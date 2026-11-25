@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en-GB" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Licence Reporting</title>
+  <script src="/theme.js"></script>
+  <link rel="icon" href="/favicon.png" type="image/png">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <a class="brand" href="#/dashboard"><img src="/logo.png" alt="">Licence Reporting</a>
+      <nav>
+        <a href="#/dashboard" data-nav="dashboard">Dashboard</a>
+        <a href="#/month-end" data-nav="month-end">Month-end report</a>
+        <a href="#/members" data-nav="members">Members on a date</a>
+        <a href="#/compare" data-nav="compare">Compare two dates</a>
+        <a href="#/admin" data-nav="admin" class="admin-only hidden">Admin</a>
+      </nav>
+    </aside>
+    <div class="main">
+      <header class="topbar">
+        <span id="env-banner" class="env-banner hidden"></span>
+        <span id="dev-banner" class="dev-banner hidden">Development sign-in</span>
+        <div class="spacer"></div>
+        <button id="theme-toggle" class="btn ghost small" type="button"></button>
+        <span id="user-name" class="user"></span>
+        <button id="logout" class="btn ghost small" type="button">Sign out</button>
+      </header>
+      <main id="view"></main>
+    </div>
+  </div>
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+  <div id="tooltip" class="chart-tip hidden" role="presentation"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
