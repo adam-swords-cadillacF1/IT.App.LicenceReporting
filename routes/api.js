@@ -125,10 +125,10 @@ router.get('/month-end.xlsx', (req, res) => {
 
 // ── Admin (IT) ───────────────────────────────────────────────────────────────
 
-router.get('/admin/groups', adminOnly, (req, res) => res.json(snaps.monitoredGroups().map(g => g.name)));
+router.get('/admin/groups', adminOnly, (req, res) => res.json(snaps.monitoredGroups('ad').map(g => g.name)));
 
 router.put('/admin/groups', adminOnly, (req, res) => {
-  const before = snaps.monitoredGroups().map(g => g.name);
+  const before = snaps.monitoredGroups('ad').map(g => g.name);
   const after = snaps.setMonitoredGroups(req.body?.groups);
   const added = after.filter(n => !before.some(b => b.toLowerCase() === n.toLowerCase()));
   const removed = before.filter(n => !after.some(a => a.toLowerCase() === n.toLowerCase()));
@@ -137,6 +137,62 @@ router.put('/admin/groups', adminOnly, (req, res) => {
       [added.length && `added ${added.join(', ')}`, removed.length && `removed ${removed.join(', ')}`].filter(Boolean).join('; '));
   }
   res.json(after);
+});
+
+// ── Entra (cloud) groups ──
+
+router.get('/admin/entra-groups', adminOnly, (req, res) => {
+  res.json({ groups: snaps.monitoredGroups('entra').map(g => ({ id: g.entraId, name: g.name })),
+    live: require('../lib/entra').configured });
+});
+
+// Each line is an object ID (anywhere in the line, so "Name (id)" as shown in Admin works) or an exact
+// display name. Every line is looked up in Entra first; if any can't be found, nothing is saved.
+async function resolveEntraLines(lines) {
+  const entra = require('../lib/entra');
+  const graph = entra.configured ? require('../lib/graph').client() : null;
+  const found = [];
+  const problems = [];
+  for (const raw of lines) {
+    const line = String(raw ?? '').trim();
+    if (!line) continue;
+    const id = line.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)?.[0];
+    const query = id || line;
+    try {
+      if (graph) {
+        const g = await graph.findGroup(query);
+        found.push({ id: g.id.toLowerCase(), name: g.displayName, synced: Boolean(g.onPremisesSyncEnabled) });
+      } else {
+        // No Entra connection (development): accept the line as it is, with a stable made-up ID
+        const fake = id || require('node:crypto').createHash('sha256').update(line).digest('hex')
+          .replace(/^(.{8})(.{4})(.{4})(.{4})(.{12}).*$/, '$1-$2-$3-$4-$5');
+        found.push({ id: fake.toLowerCase(), name: id ? `Entra group ${id.slice(0, 8)}` : line, synced: false });
+      }
+    } catch (err) {
+      problems.push(`${line.slice(0, 100)}: ${err.message}`);
+    }
+  }
+  if (problems.length) throw fail(400, problems.join('\n'));
+  return found.filter((g, i) => found.findIndex(x => x.id === g.id) === i);
+}
+
+router.put('/admin/entra-groups', adminOnly, async (req, res, next) => {
+  try {
+    if (!Array.isArray(req.body?.lines)) throw fail(400, 'Send the list of groups');
+    const before = snaps.monitoredGroups('entra').map(g => g.name);
+    const found = await resolveEntraLines(req.body.lines);
+    const synced = found.filter(g => g.synced).map(g => g.name);
+    const saved = snaps.setMonitoredEntraGroups(found).map(g => ({ id: g.entraId, name: g.name }));
+    const after = saved.map(g => g.name);
+    const added = after.filter(n => !before.includes(n));
+    const removed = before.filter(n => !after.includes(n));
+    if (added.length || removed.length) {
+      logActivity(who(req), 'Changed the Entra group list',
+        [added.length && `added ${added.join(', ')}`, removed.length && `removed ${removed.join(', ')}`].filter(Boolean).join('; '));
+    }
+    res.json({ groups: saved,
+      warning: synced.length ? `Synced from AD: ${synced.join(', ')}. These are usually better in the AD list, which also sees nested AD groups.` : null });
+  } catch (err) { next(err); }
 });
 
 router.get('/admin/snapshots', adminOnly, (req, res) => res.json(snaps.snapshotList()));

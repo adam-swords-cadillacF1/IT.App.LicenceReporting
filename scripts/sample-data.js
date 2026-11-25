@@ -51,7 +51,10 @@ const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())
 
 // Returns one snapshot object per day from start to end (inclusive). The state evolves day by day from
 // a fixed seed, so a later call for a single day matches the history.
-function generate({ groups, endDate = ymd(new Date()), days = 120, startDate = '2026-01-01' } = {}) {
+// groups: names (AD) or { name, source, entraId } as returned by monitoredGroups()
+function generate({ groups: groupList, endDate = ymd(new Date()), days = 120, startDate = '2026-01-01' } = {}) {
+  const defs = groupList.map(g => (typeof g === 'string' ? { name: g, source: 'ad' } : g));
+  const groups = defs.map(g => g.name);
   const rand = rng(42);
   const people = makePeople(rand, 420);
   // Each group gets a base share of people; E3/E5 are big, add-ons small
@@ -79,8 +82,8 @@ function generate({ groups, endDate = ymd(new Date()), days = 120, startDate = '
     const snap = {
       version: 1, date, takenAt: new Date(`${date}T00:10:${pad(Math.floor(rand() * 50))}`).toISOString(),
       computer: 'SAMPLE-DATA', runAs: 'sample-data.js',
-      groups: groups.map(name => ({
-        name, found: true, error: null,
+      groups: defs.map(({ name, source, entraId }) => ({
+        name, found: true, error: null, ...(source === 'entra' ? { source, entraId } : {}),
         members: [...membership.get(name)].map(id => ({ ...people.find(p => p.id === id) })),
       })),
     };
@@ -111,7 +114,7 @@ if (require.main === module) {
   const { monitoredGroups, INCOMING } = require('../lib/snapshots');
   if (fs.existsSync(path.join(DATA_DIR, 'PRODUCTION'))) { console.error('Refusing: this DATA_DIR is marked PRODUCTION.'); process.exit(1); }
   const days = Number(process.argv[2]) || 120;
-  const snaps = generate({ groups: monitoredGroups().map(g => g.name), days });
+  const snaps = generate({ groups: monitoredGroups(), days });
   for (const s of snaps) writeSnapshot(INCOMING, s);
   console.log(`Wrote ${snaps.length} sample snapshots to ${INCOMING}. Start (or wait for) the app to import them.`);
 }

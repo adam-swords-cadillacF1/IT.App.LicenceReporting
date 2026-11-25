@@ -165,7 +165,7 @@ async function renderDashboard() {
     <div class="group-tiles">
       ${d.groups.map(g => `
         <a class="tile group-tile" href="#/members?group=${encodeURIComponent(g.name)}" title="See the members of ${esc(g.name)}">
-          <div class="label">${esc(g.name)}</div>
+          <div class="label">${esc(g.name)}${g.source === 'entra' ? ' <span class="badge">Entra</span>' : ''}</div>
           ${g.count === null
             ? `<div class="problem"><span class="badge crit"><span class="status-icon">✕</span>Not read</span>${esc(g.problem || '')}</div>`
             : `<div class="value">${num(g.count)}</div>
@@ -182,7 +182,7 @@ async function renderDashboard() {
         <thead><tr><th>Group</th><th class="num">Members</th><th class="num">Since yesterday</th>
           ${monthLabel ? `<th class="num">Since ${esc(monthLabel)}</th>` : ''}<th class="num">Disabled accounts</th><th>Problem</th></tr></thead>
         <tbody>${d.groups.map(g => `
-          <tr class="row-link" data-group="${esc(g.name)}"><td>${esc(g.name)}</td><td class="num">${num(g.count)}</td>
+          <tr class="row-link" data-group="${esc(g.name)}"><td>${esc(g.name)}${g.source === 'entra' ? ' <span class="badge">Entra</span>' : ''}</td><td class="num">${num(g.count)}</td>
             <td class="num">${signed(g.sinceYesterday)}</td>${monthLabel ? `<td class="num">${signed(g.sinceMonthStart)}</td>` : ''}
             <td class="num">${num(g.disabled)}</td><td>${esc(g.problem || '')}</td></tr>`).join('')}
         </tbody>
@@ -420,23 +420,50 @@ async function adminSnapshots(el) {
 }
 
 async function adminGroups(el) {
-  const groups = await api('GET', '/api/admin/groups');
+  const [groups, entra] = await Promise.all([api('GET', '/api/admin/groups'), api('GET', '/api/admin/entra-groups')]);
+  const entraLines = list => list.map(g => `${g.name}  (${g.id})`).join('\n');
   el.innerHTML = `
     <div class="card">
-      <div class="card-head"><h2>Groups in the snapshot</h2></div>
+      <div class="card-head"><h2>AD groups</h2></div>
       <p>One AD group name (pre-Windows 2000 name, as in the original script) per line. Changes apply from the next snapshot;
       history for removed groups is kept. Members of nested groups are included.</p>
-      <div class="field"><label for="groups">Groups</label><textarea id="groups" class="groups" spellcheck="false">${esc(groups.join('\n'))}</textarea></div>
-      <div class="actions" style="margin-top:10px"><button id="save" class="btn primary" type="button">Save</button>
+      <div class="field"><label for="groups">AD groups</label><textarea id="groups" class="groups" spellcheck="false">${esc(groups.join('\n'))}</textarea></div>
+      <div class="actions" style="margin-top:10px"><button id="save" class="btn primary" type="button">Save AD groups</button>
         <span class="muted">If a name is wrong, the next snapshot shows "Group not found in AD" for it.</span></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>Entra groups</h2><span class="muted">Cloud groups, read through Microsoft Graph</span></div>
+      <p>For groups that exist only in Entra ID. One group per line: its display name, or its object ID. Each one is looked up
+      in Entra when you save, and kept by object ID, so renaming the group in Entra keeps its history. Members of nested groups
+      are included. Groups synced from AD are better in the AD list.</p>
+      ${entra.live ? '' : alertBox('warn', 'Entra is not connected here (development), so names are accepted without being checked.')}
+      <div class="field"><label for="entra">Entra groups</label><textarea id="entra" class="groups" style="min-height:160px" spellcheck="false"
+        placeholder="e.g. Licence - Microsoft 365 Copilot">${esc(entraLines(entra.groups))}</textarea></div>
+      <div class="actions" style="margin-top:10px"><button id="save-entra" class="btn primary" type="button">Save Entra groups</button>
+        <span class="muted">Needs the app's Graph permissions; if they're missing, saving says so.</span></div>
+      <div id="entra-msg"></div>
     </div>`;
   document.getElementById('save').addEventListener('click', async () => {
     try {
       const saved = await api('PUT', '/api/admin/groups', { groups: document.getElementById('groups').value.split(/\r?\n/) });
       state.meta = await api('GET', '/api/meta');
       document.getElementById('groups').value = saved.join('\n');
-      toast(`Saved ${saved.length} groups.`);
+      toast(`Saved ${saved.length} AD groups.`);
     } catch (err) { toast(err.message, true); }
+  });
+  document.getElementById('save-entra').addEventListener('click', async e => {
+    const msg = document.getElementById('entra-msg');
+    msg.innerHTML = '';
+    e.target.disabled = true;
+    try {
+      const r = await api('PUT', '/api/admin/entra-groups', { lines: document.getElementById('entra').value.split(/\r?\n/) });
+      state.meta = await api('GET', '/api/meta');
+      document.getElementById('entra').value = entraLines(r.groups);
+      if (r.warning) msg.innerHTML = alertBox('warn', esc(r.warning));
+      toast(`Saved ${r.groups.length} Entra group${r.groups.length === 1 ? '' : 's'}.`);
+    } catch (err) {
+      msg.innerHTML = alertBox('crit', `Nothing was saved:<br>${esc(err.message).replace(/\n/g, '<br>')}`);
+    } finally { e.target.disabled = false; }
   });
 }
 

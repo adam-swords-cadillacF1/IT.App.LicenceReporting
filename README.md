@@ -1,6 +1,6 @@
 # Licence Reporting
 
-Takes a snapshot of the licence AD groups every day at 00:10, so you can report on who was in them at any time.
+Takes a snapshot of the licence groups every day at 00:10, so you can report on who was in them at any time. It covers AD groups and Entra ID (cloud-only) groups.
 
 - **Dashboard:** members in each group now, the change since yesterday and since the start of the month, a 90-day trend line per group, and the number of disabled accounts still in each group.
 - **Month-end report:** an Excel workbook for any month. It has a summary, every member on one sheet, the month's joiners and leavers, and one sheet per group.
@@ -18,6 +18,7 @@ It replaces `1 Month End report for licesening.ps1`, and is a separate app from 
               └─ snapshot\Take-Snapshot.ps1
                    reads DATA_DIR\groups.json            (the group list, written by the app)
                    reads AD: one query per group, nested members included
+                   reads Entra groups through Microsoft Graph (snapshot\entra-groups.js, app certificate)
                    writes DATA_DIR\snapshots\incoming\<date>_<time>.json
 within 30 s   The app imports the file into DATA_DIR\licences.db and moves it to snapshots\processed (kept 30 days)
 ```
@@ -27,6 +28,21 @@ within 30 s   The app imports the file into DATA_DIR\licences.db and moves it to
 - **Month end:** the 00:10 snapshot on the 1st shows who was in the groups at the end of the previous month, so it is that month's month-end snapshot. During the month, the report uses the latest snapshot and says "to date". If the 1st is missing, it uses the last snapshot taken in the month and says so.
 - **Joiners and leavers** are matched on the AD object (objectGUID), so a change of job title or email isn't counted as someone leaving and joining.
 - **Storage:** each person's details are stored once per distinct set of values, and each day stores only who was in which group. 120 days of sample data for 13 groups is about 2.3 MB.
+
+### Entra groups
+
+Admin › Groups has a second list for groups that exist only in Entra ID. Enter a display name or an object ID, one per line. Each one is looked up in Entra when you save, and if any can't be found, nothing is saved.
+
+- **Stored by object ID,** so renaming a group in Entra keeps its history, and the next snapshot picks up the new name.
+- **Nested members are included** (Graph `transitiveMembers`). Users and mail contacts are listed; devices and service principals are left out because they don't hold licences.
+- **The same person is counted once across AD and Entra.** For users synced from AD, `onPremisesImmutableId` is turned back into their AD objectGUID, so someone in an AD group and an Entra group is one person in "People in at least one group".
+- **Synced groups are flagged when you save.** Synced groups are better in the AD list, which also sees nested AD groups. A name already used by an AD group is refused.
+- **Reading the groups:** `Take-Snapshot.ps1` runs `entra-groups.js` with the app's own Node.js and `app.env`. It signs in to Graph with the app's certificate, so no other secret is stored. Graph errors are retried like domain controller errors. The data goes through files rather than the console, so accented names survive Windows PowerShell 5.1.
+- **Permissions:** the app registration needs these **Application** permissions (not Delegated), with admin consent:
+  - `GroupMember.Read.All`, to find groups and list their members;
+  - `User.Read.All`, for job title, department and whether the account is enabled.
+
+  If they're missing, saving the Entra list says so, and so does the snapshot log.
 
 ### Compared with the old script
 
@@ -93,7 +109,7 @@ Same server and deployment method as ChangeManagementApp: **sl-pvs-appl16**, dep
    - **App roles** › Create app role, twice. Allowed member types: Users/Groups.
      - Display name `Admin`, value **`Admin`**, description "IT: group list, snapshots, retention, activity log"
      - Display name `Viewer`, value **`Viewer`**, description "Finance: dashboard and reports"
-   - **API permissions:** Microsoft Graph delegated `openid`, `profile`, `email` (and the default `User.Read`). No application permissions are needed.
+   - **API permissions:** Microsoft Graph delegated `openid`, `profile`, `email` (and the default `User.Read`) for sign-in. For Entra groups, also add the **Application** permissions `GroupMember.Read.All` and `User.Read.All`, then click **Grant admin consent**.
    - **Enterprise application** › Properties › *Assignment required* = **Yes**. Under *Users and groups*, assign the Finance group to **Viewer** and IT to **Admin**.
    - Note the **Directory (tenant) ID** and **Application (client) ID** for app.env.
 2. **DNS and proxy:** `licencereporting.hermes.uk.net` → Nginx Proxy Manager on sl-pvs-dock02 → `sl-pvs-appl16:3003`, with `X-Forwarded-Proto` set.

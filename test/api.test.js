@@ -56,6 +56,21 @@ test('a viewer (Finance) sees the dashboard and reports but not Admin', async ()
   const put = await get('/api/admin/groups', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{"groups":["X"]}' });
   assert.equal(put.status, 403);
   assert.equal((await get('/api/admin/snapshot-now', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 403);
+  assert.equal((await get('/api/admin/entra-groups')).status, 403);
+  assert.equal((await get('/api/admin/entra-groups', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{"lines":["X"]}' })).status, 403);
+});
+
+test('an admin can add Entra groups (looked up without Entra in development) and they reach the snapshot task', async () => {
+  const get = await signIn('admin');
+  const put = body => get('/api/admin/entra-groups', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await (await put({ lines: ['Licence - Copilot', '', 'Licence - Copilot', 'Shown name  (aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee)'] })).json();
+  assert.deepEqual(r.groups.map(g => g.name), ['Licence - Copilot', 'Entra group aaaaaaaa']);
+  assert.equal(r.groups[1].id, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+  const file = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'groups.json'), 'utf8'));
+  assert.deepEqual(file.entraGroups.map(g => g.name), ['Licence - Copilot', 'Entra group aaaaaaaa']);
+  assert.equal((await put({ lines: ['DL-M365-Visio'] })).status, 400);   // same name as an AD group
+  const meta = await (await get('/api/meta')).json();
+  assert.ok(meta.groups.includes('Licence - Copilot'));
 });
 
 test('reports: members on a date, compare, and month end, as JSON and Excel', async () => {

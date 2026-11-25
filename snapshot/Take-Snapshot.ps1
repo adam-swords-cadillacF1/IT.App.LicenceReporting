@@ -1,5 +1,5 @@
 <#
-  Takes one snapshot of the licence AD groups and hands it to the Licence Reporting app.
+  Takes one snapshot of the licence groups (AD, and Entra cloud groups) and hands it to the Licence Reporting app.
   Runs ON THE SERVER as the "LicenceReporting snapshot" scheduled task (daily at 00:10, as SYSTEM),
   installed by deploy/windows/server/Install-SnapshotTask.ps1. The app's "Take snapshot now" button
   starts the same task.
@@ -8,6 +8,8 @@
   - For each group, finds every member, including members of nested groups: users (name, email, job
     title, department, username, enabled), mail contacts, and members from other domains (shown by
     account name; their details are not readable from this domain)
+  - Entra (cloud) groups are read through Microsoft Graph by entra-groups.js (next to this script), run with
+    the app's Node.js and settings, signing in with the app's certificate
   - Writes <DataDir>\snapshots\incoming\<date>_<time>.json, which the app imports within 30 seconds
   - A group that can't be read (e.g. a domain controller error) is tried again, up to -Attempts times,
     -RetryMinutes apart, before the snapshot is written. A group that doesn't exist isn't retried.
@@ -60,15 +62,27 @@ function ConvertTo-LdapFilterValue([string] $Value) {
 
 function Get-Text($Value) { if ($null -eq $Value) { '' } else { ([string]$Value).Trim() } }
 
+# Parses JSON of any size into dictionaries. Windows PowerShell 5.1's ConvertFrom-Json can refuse very large
+# documents, and dictionaries can have keys removed before the snapshot is written.
+function ConvertFrom-JsonText([string] $Text) {
+    if ($PSVersionTable.PSVersion.Major -ge 6) { return ($Text | ConvertFrom-Json -AsHashtable) }
+    Add-Type -AssemblyName System.Web.Extensions
+    $serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+    $serializer.MaxJsonLength = [int]::MaxValue
+    return $serializer.DeserializeObject($Text)
+}
+
 try {
-    if (-not $SkipModuleImport) { Import-Module ActiveDirectory -ErrorAction Stop }
     $AD = @{}
     if ($Server) { $AD.Server = $Server }
 
     $groupsFile = Join-Path $DataDir 'groups.json'
     if (-not (Test-Path $groupsFile)) { throw "No group list at $groupsFile. Start the app once so it writes the list." }
-    $groupNames = @((Get-Content $groupsFile -Raw -Encoding UTF8 | ConvertFrom-Json).groups | Where-Object { $_ })
-    if (-not $groupNames.Count) { throw "The group list in $groupsFile is empty." }
+    $list = Get-Content $groupsFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    $groupNames = @($list.groups | Where-Object { $_ })
+    $entraGroups = @($list.entraGroups | Where-Object { $_ -and $_.id })
+    if (-not $groupNames.Count -and -not $entraGroups.Count) { throw "The group list in $groupsFile is empty." }
+    if ($groupNames.Count -and -not $SkipModuleImport) { Import-Module ActiveDirectory -ErrorAction Stop }
 
     # "Take snapshot now" in the app leaves a note of who asked; only trust a recent one
     $requestedBy = $null
@@ -83,7 +97,7 @@ try {
 
     $who = [Environment]::UserName
     try { $who = [Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { }
-    Write-Log "Snapshot of $($groupNames.Count) group(s) as $who$(if ($requestedBy) { ", requested by $requestedBy" })"
+    Write-Log "Snapshot of $($groupNames.Count) AD and $($entraGroups.Count) Entra group(s) as $who$(if ($requestedBy) { ", requested by $requestedBy" })"
     $userProps = @('DisplayName', 'mail', 'Title', 'Department', 'Enabled', 'ObjectGUID', 'SamAccountName', 'GivenName', 'Surname')
     $contactProps = @('displayName', 'mail', 'title', 'department', 'objectGUID', 'name')
 
@@ -136,12 +150,53 @@ try {
         $entry
     }
 
+    # Entra groups, all in one run of entra-groups.js. Files carry the data both ways (see that script).
+    function Read-EntraGroups($toRead) {
+        $req = Join-Path $DataDir 'snapshots\entra-request.json'
+        $res = Join-Path $DataDir 'snapshots\entra-result.json'
+        Remove-Item $res -Force -ErrorAction SilentlyContinue
+        $body = [ordered]@{ config = $list.config; groups = @($toRead | ForEach-Object { [ordered]@{ id = $_.id; name = $_.name } }) }
+        [IO.File]::WriteAllText($req, ($body | ConvertTo-Json -Depth 4 -Compress), (New-Object System.Text.UTF8Encoding($false)))
+        $node = if ($list.node) { $list.node } else { 'node' }
+        $problem = $null
+        try {
+            $previous = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            & $node (Join-Path $PSScriptRoot 'entra-groups.js') $req $res 2>&1 | Out-Null
+            $code = $LASTEXITCODE
+            $ErrorActionPreference = $previous
+            $parsed = if (Test-Path $res) { ConvertFrom-JsonText ([IO.File]::ReadAllText($res, [Text.Encoding]::UTF8)) } else { $null }
+            if (-not $parsed) { $problem = "entra-groups.js wrote no result (exit $code)" }
+            elseif ($parsed['error']) { $problem = [string]$parsed['error'] }
+        } catch {
+            $ErrorActionPreference = 'Stop'
+            $problem = "Could not run entra-groups.js: $($_.Exception.Message)"
+        } finally {
+            Remove-Item $req, $res -Force -ErrorAction SilentlyContinue
+        }
+        $out = @{}
+        foreach ($g in $toRead) {
+            $entry = $null
+            if (-not $problem) { $entry = @($parsed['groups']) | Where-Object { $_['entraId'] -eq $g.id } | Select-Object -First 1 }
+            if (-not $entry) {
+                $entry = [ordered]@{ name = [string]$g.name; source = 'entra'; entraId = [string]$g.id; found = $false
+                    error = $(if ($problem) { $problem } else { 'No result for this group' }); members = @(); retry = $true }
+            }
+            if ($entry['error']) { Write-Log ("  {0} (Entra): FAILED - {1}" -f $g.name, $entry['error']) }
+            else { Write-Log ("  {0} (Entra): {1} member(s)" -f $entry['name'], @($entry['members']).Count) }
+            $out[[string]$g.id] = $entry
+        }
+        $out
+    }
+
     $results = [ordered]@{}
+    $entraResults = @{}
+    $retryable = { param($e) $e['error'] -and $e['retry'] }
     for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
-        $toRead = @($groupNames | Where-Object { -not $results.Contains($_) -or ($results[$_].error -and $results[$_].retry) })
-        if (-not $toRead.Count) { break }
+        $toRead = @($groupNames | Where-Object { -not $results.Contains($_) -or (& $retryable $results[$_]) })
+        $entraToRead = @($entraGroups | Where-Object { -not $entraResults.ContainsKey([string]$_.id) -or (& $retryable $entraResults[[string]$_.id]) })
+        if (-not $toRead.Count -and -not $entraToRead.Count) { break }
         if ($attempt -gt 1) {
-            Write-Log "Trying $($toRead.Count) group(s) again in $RetryMinutes minute(s) (attempt $attempt of $Attempts)"
+            Write-Log "Trying $($toRead.Count + $entraToRead.Count) group(s) again in $RetryMinutes minute(s) (attempt $attempt of $Attempts)"
             Start-Sleep -Seconds ($RetryMinutes * 60)
         }
         foreach ($name in $toRead) {
@@ -150,13 +205,17 @@ try {
             $entry.retry = $script:retry
             $results[$name] = $entry
         }
+        if ($entraToRead.Count) {
+            $read = Read-EntraGroups $entraToRead
+            foreach ($id in $read.Keys) { $entraResults[$id] = $read[$id] }
+        }
     }
     $groups = @()
     $failures = 0
-    foreach ($name in $groupNames) {
-        $entry = $results[$name]
+    $ordered = @($groupNames | ForEach-Object { $results[$_] }) + @($entraGroups | ForEach-Object { $entraResults[[string]$_.id] })
+    foreach ($entry in $ordered) {
         $entry.Remove('retry')
-        if ($entry.error) { $failures++ }
+        if ($entry['error']) { $failures++ }
         $groups += ,$entry
     }
 
@@ -170,7 +229,7 @@ try {
         runAs       = $who
         groups      = $groups
     }
-    $json = $snapshot | ConvertTo-Json -Depth 6 -Compress
+    $json = $snapshot | ConvertTo-Json -Depth 8 -Compress
     # Written under a temporary name, then renamed, so the app never reads a half-written file
     $final = Join-Path $incoming ("{0}_{1}.json" -f $date, $started.ToString('HHmmss'))
     [IO.File]::WriteAllText("$final.tmp", $json, (New-Object System.Text.UTF8Encoding($false)))
