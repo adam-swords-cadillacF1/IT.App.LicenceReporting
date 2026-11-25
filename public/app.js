@@ -62,6 +62,11 @@ function download(url) {
   a.remove();
 }
 
+// A group as people know it: the friendly name, with the real AD/Entra group it looks up underneath
+const groupCell = (name, label) => (label ? `${esc(label)}<div class="sub-name">${esc(name)}</div>` : esc(name));
+const groupTitle = name => state.meta.groups.find(g => g.name === name)?.label || name;
+const entraBadge = g => (g.source === 'entra' ? ' <span class="badge">Entra</span>' : '');
+
 const snapshotBadge = s => {
   if (!s) return '';
   if (s.status === 'complete' && !s.late) return '<span class="badge"><span class="dot" style="background:var(--good)"></span>Complete</span>';
@@ -164,8 +169,8 @@ async function renderDashboard() {
     </div>
     <div class="group-tiles">
       ${d.groups.map(g => `
-        <a class="tile group-tile" href="#/members?group=${encodeURIComponent(g.name)}" title="See the members of ${esc(g.name)}">
-          <div class="label">${esc(g.name)}${g.source === 'entra' ? ' <span class="badge">Entra</span>' : ''}</div>
+        <a class="tile group-tile" href="#/members?group=${encodeURIComponent(g.name)}" title="See the members of ${esc(g.label || g.name)}">
+          <div class="label"><span>${esc(g.label || g.name)}${entraBadge(g)}${g.label ? `<div class="sub-name">${esc(g.name)}</div>` : ''}</span></div>
           ${g.count === null
             ? `<div class="problem"><span class="badge crit"><span class="status-icon">✕</span>Not read</span>${esc(g.problem || '')}</div>`
             : `<div class="value">${num(g.count)}</div>
@@ -182,7 +187,7 @@ async function renderDashboard() {
         <thead><tr><th>Group</th><th class="num">Members</th><th class="num">Since yesterday</th>
           ${monthLabel ? `<th class="num">Since ${esc(monthLabel)}</th>` : ''}<th class="num">Disabled accounts</th><th>Problem</th></tr></thead>
         <tbody>${d.groups.map(g => `
-          <tr class="row-link" data-group="${esc(g.name)}"><td>${esc(g.name)}${g.source === 'entra' ? ' <span class="badge">Entra</span>' : ''}</td><td class="num">${num(g.count)}</td>
+          <tr class="row-link" data-group="${esc(g.name)}"><td>${groupCell(g.name, g.label)}${entraBadge(g)}</td><td class="num">${num(g.count)}</td>
             <td class="num">${signed(g.sinceYesterday)}</td>${monthLabel ? `<td class="num">${signed(g.sinceMonthStart)}</td>` : ''}
             <td class="num">${num(g.disabled)}</td><td>${esc(g.problem || '')}</td></tr>`).join('')}
         </tbody>
@@ -198,11 +203,12 @@ async function renderDashboard() {
 // ── Members on a date ────────────────────────────────────────────────────────
 
 const groupOptions = (selected, allLabel = 'All groups') =>
-  `<option value="">${allLabel}</option>${state.meta.groups.map(g => `<option ${g === selected ? 'selected' : ''}>${esc(g)}</option>`).join('')}`;
+  `<option value="">${allLabel}</option>${state.meta.groups.map(g => `<option value="${esc(g.name)}" ${g.name === selected ? 'selected' : ''}>${
+    esc(g.label ? `${g.label} — ${g.name}` : g.name)}</option>`).join('')}`;
 
 function memberRows(rows, { withGroup = true, change = false } = {}) {
   return rows.map(m => `<tr>
-    ${withGroup ? `<td>${esc(m.group)}</td>` : ''}${change ? `<td>${m.change === 'Joined' ? '+ Joined' : '− Left'}</td>` : ''}
+    ${withGroup ? `<td>${groupCell(m.group, m.groupLabel)}</td>` : ''}${change ? `<td>${m.change === 'Joined' ? '+ Joined' : '− Left'}</td>` : ''}
     <td>${esc(m.name)}</td><td>${esc(m.email)}</td><td>${esc(m.title)}</td><td>${esc(m.department)}</td>
     <td>${m.kind === 'user' && m.enabled === false ? '<span class="badge warn">Disabled</span>' : esc(statusText(m))}</td></tr>`).join('');
 }
@@ -230,21 +236,22 @@ async function renderMembers(params) {
 
   const draw = () => {
     const q = fSearch.value.trim().toLowerCase();
-    const rows = q ? data.rows.filter(m => [m.name, m.email, m.title, m.department, m.group]
+    const rows = q ? data.rows.filter(m => [m.name, m.email, m.title, m.department, m.group, m.groupLabel]
       .some(v => String(v || '').toLowerCase().includes(q))) : data.rows;
     const s = data.snapshot;
     const notes = [];
     if (s.date !== data.requestedDate) notes.push(alertBox('info', `There is no snapshot for ${esc(fmtDate(data.requestedDate))}, so this is the one before it, ${esc(fmtDate(s.date))}.`));
     const problems = data.groups.filter(g => g.problem);
-    if (problems.length) notes.push(alertBox('warn', `Could not be read in this snapshot: ${problems.map(g => `${esc(g.name)} (${esc(g.problem)})`).join('; ')}.`));
+    if (problems.length) notes.push(alertBox('warn', `Could not be read in this snapshot: ${problems.map(g => `${esc(g.label || g.name)} (${esc(g.problem)})`).join('; ')}.`));
     result.innerHTML = `${notes.join('')}
       <p class="count-note">Snapshot of ${esc(fmtDate(s.date))}, taken ${esc(fmtDateTime(s.takenAt))} ${snapshotBadge(s)}</p>
       ${fGroup.value ? '' : `<div class="card"><div class="card-head"><h2>Members per group</h2></div>
         <div class="table-wrap"><table class="table"><thead><tr><th>Group</th><th class="num">Members</th><th class="num">Disabled accounts</th></tr></thead>
-        <tbody>${data.groups.map(g => `<tr class="row-link" data-group="${esc(g.name)}"><td>${esc(g.name)}</td>
+        <tbody>${data.groups.map(g => `<tr class="row-link" data-group="${esc(g.name)}"><td>${groupCell(g.name, g.label)}</td>
           <td class="num">${g.problem ? '—' : num(g.count)}</td><td class="num">${g.problem ? '—' : num(g.disabled)}</td></tr>`).join('')}</tbody></table></div></div>`}
       <div class="card">
-        <div class="card-head"><h2>${fGroup.value ? esc(fGroup.value) : 'All members'}</h2>
+        <div class="card-head"><h2>${fGroup.value ? `${esc(groupTitle(fGroup.value))}${groupTitle(fGroup.value) !== fGroup.value
+          ? ` <span class="muted" style="font-weight:400;font-size:13px">${esc(fGroup.value)}</span>` : ''}` : 'All members'}</h2>
           <span class="muted">${q ? `${num(rows.length)} of ${num(data.rows.length)} shown` : `${num(rows.length)} ${fGroup.value ? 'members' : 'memberships'}`}</span></div>
         <div class="table-wrap"><table class="table"><thead>${memberHead({ withGroup: !fGroup.value })}</thead>
           <tbody>${memberRows(rows, { withGroup: !fGroup.value }) || '<tr><td colspan="7" class="muted">Nobody matches.</td></tr>'}</tbody></table></div>
@@ -300,7 +307,7 @@ async function renderCompare(params) {
         <div class="card"><div class="card-head"><h2>Summary</h2><span class="muted">${esc(fmtDate(d.from.date))} → ${esc(fmtDate(d.to.date))}</span></div>
           <div class="table-wrap"><table class="table"><thead><tr><th>Group</th><th class="num">${esc(fmtDayMonth(d.from.date))}</th>
             <th class="num">${esc(fmtDayMonth(d.to.date))}</th><th class="num">Joined</th><th class="num">Left</th></tr></thead>
-          <tbody>${d.groups.map(g => `<tr><td>${esc(g.name)}</td><td class="num">${num(g.before)}</td><td class="num">${num(g.after)}</td>
+          <tbody>${d.groups.map(g => `<tr><td>${groupCell(g.name, g.label)}</td><td class="num">${num(g.before)}</td><td class="num">${num(g.after)}</td>
             <td class="num">${g.added.length ? `+${num(g.added.length)}` : '0'}</td><td class="num">${g.removed.length ? `−${num(g.removed.length)}` : '0'}</td></tr>`).join('')}</tbody></table></div></div>
         <div class="card"><div class="card-head"><h2>Joiners and leavers</h2><span class="muted">${num(changes.length)}</span></div>
           <div class="table-wrap"><table class="table"><thead>${memberHead({ change: true })}</thead>
@@ -350,7 +357,7 @@ async function renderMonthEnd(params) {
           <div class="table-wrap"><table class="table">
             <thead><tr><th>Group</th><th class="num">Members</th><th class="num">Joined in month</th><th class="num">Left in month</th>
               <th class="num">Disabled accounts</th><th>Problem</th></tr></thead>
-            <tbody>${r.groups.map(g => `<tr><td>${esc(g.name)}</td><td class="num">${g.problem ? '—' : num(g.count)}</td>
+            <tbody>${r.groups.map(g => `<tr><td>${groupCell(g.name, g.label)}${entraBadge(g)}</td><td class="num">${g.problem ? '—' : num(g.count)}</td>
               <td class="num">${g.added === null ? '—' : g.added ? `+${num(g.added)}` : '0'}</td>
               <td class="num">${g.removed === null ? '—' : g.removed ? `−${num(g.removed)}` : '0'}</td>
               <td class="num">${g.problem ? '—' : num(g.disabled)}</td><td>${esc(g.problem || '')}</td></tr>`).join('')}
@@ -420,9 +427,22 @@ async function adminSnapshots(el) {
 }
 
 async function adminGroups(el) {
-  const [groups, entra] = await Promise.all([api('GET', '/api/admin/groups'), api('GET', '/api/admin/entra-groups')]);
+  const [groups, entra, labels] = await Promise.all([api('GET', '/api/admin/groups'), api('GET', '/api/admin/entra-groups'),
+    api('GET', '/api/admin/group-labels')]);
   const entraLines = list => list.map(g => `${g.name}  (${g.id})`).join('\n');
   el.innerHTML = `
+    <div class="card">
+      <div class="card-head"><h2>Friendly names</h2><span class="muted">Shown in place of the group name, with the group underneath</span></div>
+      <p>Give each group a name people recognise, e.g. "Microsoft 365 E3" for DL-M365-E3-License. Screens and Excel reports show the
+      friendly name, and always say which AD or Entra group it looks up. Leave it blank to show the group name. Groups are still looked
+      up by their real name, so this never changes what is counted.</p>
+      <div class="table-wrap"><table class="table">
+        <thead><tr><th>Group it looks up</th><th>Source</th><th style="width:45%">Friendly name</th></tr></thead>
+        <tbody>${labels.map(g => `<tr><td class="mono">${esc(g.name)}</td><td>${g.source === 'entra' ? 'Entra ID' : 'AD'}</td>
+          <td><input type="text" maxlength="80" data-label-id="${g.id}" value="${esc(g.label || '')}" aria-label="Friendly name for ${esc(g.name)}"></td></tr>`).join('')}
+        </tbody></table></div>
+      <div class="actions" style="margin-top:10px"><button id="save-labels" class="btn primary" type="button">Save friendly names</button></div>
+    </div>
     <div class="card">
       <div class="card-head"><h2>AD groups</h2></div>
       <p>One AD group name (pre-Windows 2000 name, as in the original script) per line. Changes apply from the next snapshot;
@@ -443,12 +463,23 @@ async function adminGroups(el) {
         <span class="muted">Needs the app's Graph permissions; if they're missing, saving says so.</span></div>
       <div id="entra-msg"></div>
     </div>`;
+  document.getElementById('save-labels').addEventListener('click', async () => {
+    try {
+      const body = [...el.querySelectorAll('[data-label-id]')].map(i => ({ id: Number(i.dataset.labelId), label: i.value }));
+      await api('PUT', '/api/admin/group-labels', { labels: body });
+      state.meta = await api('GET', '/api/meta');
+      toast('Friendly names saved.');
+    } catch (err) { toast(err.message, true); }
+  });
+  // Adding or removing groups changes the friendly-names table, so it is redrawn after either list is saved
+  const redraw = () => adminGroups(el);
   document.getElementById('save').addEventListener('click', async () => {
     try {
       const saved = await api('PUT', '/api/admin/groups', { groups: document.getElementById('groups').value.split(/\r?\n/) });
       state.meta = await api('GET', '/api/meta');
       document.getElementById('groups').value = saved.join('\n');
       toast(`Saved ${saved.length} AD groups.`);
+      redraw();
     } catch (err) { toast(err.message, true); }
   });
   document.getElementById('save-entra').addEventListener('click', async e => {
@@ -461,6 +492,7 @@ async function adminGroups(el) {
       document.getElementById('entra').value = entraLines(r.groups);
       if (r.warning) msg.innerHTML = alertBox('warn', esc(r.warning));
       toast(`Saved ${r.groups.length} Entra group${r.groups.length === 1 ? '' : 's'}.`);
+      if (!r.warning) redraw();
     } catch (err) {
       msg.innerHTML = alertBox('crit', `Nothing was saved:<br>${esc(err.message).replace(/\n/g, '<br>')}`);
     } finally { e.target.disabled = false; }

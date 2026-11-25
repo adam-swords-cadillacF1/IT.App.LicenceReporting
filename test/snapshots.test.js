@@ -175,7 +175,29 @@ test('month-end workbook has a summary, all members, joiners and leavers, and a 
   assert.match(files['xl/worksheets/sheet3.xml'], /Person 4/);
   // The agreed columns: name, email, job title, department and account status (plus the group where several are shown)
   const headers = [...files['xl/worksheets/sheet2.xml'].matchAll(/<c r="[A-Z]+4" s="1" t="inlineStr"><is><t xml:space="preserve">([^<]+)</g)].map(m => m[1]);
-  assert.deepEqual(headers, ['Group', 'Name', 'Email', 'Job title', 'Department', 'Account status']);
+  assert.deepEqual(headers, ['Group', 'Directory group', 'Name', 'Email', 'Job title', 'Department', 'Account status']);
+});
+
+test('friendly names: shown first in reports, with the real group alongside; the sheet is named after the friendly name', () => {
+  const g1 = db.prepare("SELECT id FROM ad_groups WHERE name = 'G1'").get().id;
+  assert.throws(() => snaps.setGroupLabels([{ id: g1, label: 'Copilot' }]), /no longer in the list/);   // G1 isn't monitored
+  db.prepare('UPDATE ad_groups SET monitored = 1 WHERE id = ?').run(g1);
+  assert.deepEqual(snaps.setGroupLabels([{ id: g1, label: 'Copilot licences' }]), ['G1: "Copilot licences"']);
+  assert.deepEqual(snaps.setGroupLabels([{ id: g1, label: 'Copilot licences' }]), []);   // unchanged
+  const report = snaps.monthEnd('2026-11', '2026-11-25');
+  const files = unzip(reports.monthEndWorkbook(report, 'Test'));
+  const names = [...files['xl/workbook.xml'].matchAll(/<sheet name="([^"]+)"/g)].map(m => m[1]);
+  assert.ok(names.includes('Copilot licences'));
+  assert.ok(!names.includes('G1'));
+  const summary = files['xl/worksheets/sheet1.xml'];
+  assert.match(summary, />Copilot licences<\/t><\/is><\/c><c r="B\d+" t="inlineStr"><is><t xml:space="preserve">G1</);
+  const all = files['xl/worksheets/sheet2.xml'];
+  assert.match(all, />Copilot licences<\/t><\/is><\/c><c r="B\d+" t="inlineStr"><is><t xml:space="preserve">G1</);
+  const sheetIndex = names.indexOf('Copilot licences') + 1;
+  assert.match(files[`xl/worksheets/sheet${sheetIndex}.xml`], /Looks up the AD group G1\./);
+  snaps.setGroupLabels([{ id: g1, label: '' }]);
+  assert.equal(db.prepare('SELECT label FROM ad_groups WHERE id = ?').get(g1).label, null);
+  db.prepare('UPDATE ad_groups SET monitored = 0 WHERE id = ?').run(g1);
 });
 
 test('account status says Disabled, or what a member is when they have no account here', () => {

@@ -51,7 +51,7 @@ router.get('/meta', (req, res) => {
     last: dates.at(-1)?.date || null,
     dates: dates.map(d => d.date),
     months: snaps.reportMonths(),
-    groups: snaps.monitoredGroups().map(g => g.name),
+    groups: snaps.monitoredGroups().map(g => ({ name: g.name, label: g.label, source: g.source })),
   });
 });
 
@@ -137,6 +137,18 @@ router.put('/admin/groups', adminOnly, (req, res) => {
       [added.length && `added ${added.join(', ')}`, removed.length && `removed ${removed.join(', ')}`].filter(Boolean).join('; '));
   }
   res.json(after);
+});
+
+// ── Friendly names ──
+
+router.get('/admin/group-labels', adminOnly, (req, res) => {
+  res.json(snaps.monitoredGroups().map(g => ({ id: g.id, name: g.name, source: g.source, label: g.label })));
+});
+
+router.put('/admin/group-labels', adminOnly, (req, res) => {
+  const changed = snaps.setGroupLabels(req.body?.labels);
+  if (changed.length) logActivity(who(req), 'Changed friendly names', changed.join('; '));
+  res.json(snaps.monitoredGroups().map(g => ({ id: g.id, name: g.name, source: g.source, label: g.label })));
 });
 
 // ── Entra (cloud) groups ──

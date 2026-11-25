@@ -395,3 +395,4 @@ h2.month { margin: 24px 0 10px; color: var(--text-2); font-size: 15px; }
 .tag-joined { color: var(--text); }
 .tag-left { color: var(--text); }
 textarea.groups { min-height: 320px; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
+.sub-name { color: var(--muted); font-size: 12px; font-weight: 400; word-break: break-all; }

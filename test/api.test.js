@@ -70,7 +70,30 @@ test('an admin can add Entra groups (looked up without Entra in development) and
   assert.deepEqual(file.entraGroups.map(g => g.name), ['Licence - Copilot', 'Entra group aaaaaaaa']);
   assert.equal((await put({ lines: ['DL-M365-Visio'] })).status, 400);   // same name as an AD group
   const meta = await (await get('/api/meta')).json();
-  assert.ok(meta.groups.includes('Licence - Copilot'));
+  assert.ok(meta.groups.some(g => g.name === 'Licence - Copilot' && g.source === 'entra'));
+});
+
+test('friendly names: an admin sets them, they show in the API and Excel, and viewers cannot change them', async () => {
+  const admin = await signIn('admin');
+  const put = (get, body) => get('/api/admin/group-labels', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const groups = await (await admin('/api/admin/group-labels')).json();
+  const e3 = groups.find(g => g.name === 'DL-M365-E3-License');
+  const saved = await (await put(admin, { labels: [{ id: e3.id, label: '  Microsoft 365 E3  ' }] })).json();
+  assert.equal(saved.find(g => g.id === e3.id).label, 'Microsoft 365 E3');
+  const copilot = groups.find(g => g.name === 'DL-M365-CoPilot');
+  assert.equal((await put(admin, { labels: [{ id: copilot.id, label: 'microsoft 365 e3' }] })).status, 400);   // same as another
+  assert.equal((await put(admin, { labels: [{ id: copilot.id, label: 'x'.repeat(81) }] })).status, 400);
+
+  const viewer = await signIn('viewer');
+  assert.equal((await put(viewer, { labels: [{ id: e3.id, label: 'Nope' }] })).status, 403);
+  const meta = await (await viewer('/api/meta')).json();
+  assert.equal(meta.groups.find(g => g.name === 'DL-M365-E3-License').label, 'Microsoft 365 E3');
+  const dash = await (await viewer('/api/dashboard')).json();
+  assert.equal(dash.groups.find(g => g.name === 'DL-M365-E3-License').label, 'Microsoft 365 E3');
+  const members = await (await viewer(`/api/members?group=DL-M365-E3-License`)).json();
+  assert.ok(members.rows.every(r => r.groupLabel === 'Microsoft 365 E3'));
+  const activity = await (await admin('/api/admin/activity')).json();
+  assert.ok(activity.some(a => a.action === 'Changed friendly names' && /DL-M365-E3-License: "Microsoft 365 E3"/.test(a.detail)));
 });
 
 test('reports: members on a date, compare, and month end, as JSON and Excel', async () => {

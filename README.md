@@ -29,6 +29,15 @@ within 30 s   The app imports the file into DATA_DIR\licences.db and moves it to
 - **Joiners and leavers** are matched on the AD object (objectGUID), so a change of job title or email isn't counted as someone leaving and joining.
 - **Storage:** each person's details are stored once per distinct set of values, and each day stores only who was in which group. 120 days of sample data for 13 groups is about 2.3 MB.
 
+### Friendly names
+
+Each group can have a friendly name, set under **Admin › Groups › Friendly names**. For example, "Microsoft 365 E3" for `DL-M365-E3-License`.
+
+- **On screen:** the friendly name comes first, with the real group name underneath in small grey text.
+- **In Excel:** a **Group** column holds the friendly name and a **Directory group** column holds the real AD or Entra group. Per-group sheets are named after the friendly name and start with "Looks up the AD group …".
+- **Display only:** groups are still looked up by their real name (AD) or object ID (Entra), so a friendly name never changes what is counted. It also applies to reports for earlier dates.
+- **Rules:** friendly names must be different from each other and at most 80 characters. Changes are recorded in the activity log.
+
 ### Entra groups
 
 Admin › Groups has a second list for groups that exist only in Entra ID. Enter a display name or an object ID, one per line. Each one is looked up in Entra when you save, and if any can't be found, nothing is saved.
