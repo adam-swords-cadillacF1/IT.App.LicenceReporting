@@ -1,0 +1,11 @@
+# Sandbox build with public sources (deploy/sandbox/run.sh --public), approved for the local sandbox only when
+# Artifactory isn't reachable. Same safeguards as the project .npmrc; only the registry differs. The Dockerfile points
+# the lockfile's Artifactory URLs at this registry inside the build; every package is still checked against the
+# lockfile's sha512 integrity hash, so it must be byte-identical to what Artifactory serves.
+registry=https://registry.npmjs.org/
+strict-ssl=true
+save-exact=true
+engine-strict=true
+ignore-scripts=true
+audit=true
+fund=false
