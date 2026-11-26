@@ -396,3 +396,7 @@ h2.month { margin: 24px 0 10px; color: var(--text-2); font-size: 15px; }
 .tag-left { color: var(--text); }
 textarea.groups { min-height: 320px; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
 .sub-name { color: var(--muted); font-size: 12px; font-weight: 400; word-break: break-all; }
+
+/* Cato page: the month whose users are shown */
+.table tr.selected td { background: var(--surface-2); box-shadow: inset 0 1px 0 var(--accent), inset 0 -1px 0 var(--accent); }
+.table tr.selected td:first-child { box-shadow: inset 3px 0 0 var(--accent), inset 0 1px 0 var(--accent), inset 0 -1px 0 var(--accent); }

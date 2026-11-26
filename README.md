@@ -1,11 +1,12 @@
 # Licence Reporting
 
-Takes a snapshot of the licence groups every day at 00:10, so you can report on who was in them at any time. It covers AD groups and Entra ID (cloud-only) groups.
+Takes a snapshot of the licence groups every day at 00:10, so you can report on who was in them at any time. It covers AD groups, Entra ID (cloud-only) groups and, optionally, the users holding a Cato ZTNA (remote access) licence.
 
 - **Dashboard:** members in each group now, the change since yesterday and since the start of the month, a 90-day trend line per group, and the number of disabled accounts still in each group.
 - **Month-end report:** an Excel workbook for any month. It has a summary, every member on one sheet, the month's joiners and leavers, and one sheet per group.
 - **Members on a date:** who was in each group on any day since the first snapshot, on screen or as Excel.
 - **Compare two dates:** who joined and left each group between two days.
+- **Cato ZTNA users** (when Cato is switched on): a dashboard widget with the number of users holding a Cato remote access licence. It opens a page with the users, joiners and leavers, and a month-by-month table, downloadable as CSV or Excel.
 
 Every member row shows **name, email, job title, department and account status**. The status is Enabled or Disabled. For members with no account in this domain, it says "Contact (no account)" or "Account in another domain".
 
@@ -19,6 +20,7 @@ It replaces `1 Month End report for licesening.ps1`, and is a separate app from 
                    reads DATA_DIR\groups.json            (the group list, written by the app)
                    reads AD: one query per group, nested members included
                    reads Entra groups through Microsoft Graph (snapshot\entra-groups.js, app certificate)
+                   reads Cato ZTNA licence holders through the Cato API (snapshot\cato-users.js, API key), if switched on
                    writes DATA_DIR\snapshots\incoming\<date>_<time>.json
 within 30 s   The app imports the file into DATA_DIR\licences.db and moves it to snapshots\processed (kept 30 days)
 ```
@@ -52,6 +54,27 @@ Admin › Groups has a second list for groups that exist only in Entra ID. Enter
   - `User.Read.All`, for job title, department and whether the account is enabled.
 
   If they're missing, saving the Entra list says so, and so does the snapshot log.
+
+### Cato ZTNA licences
+
+Switch on **Admin › Groups › Cato ZTNA users** to add the users holding a Cato ZTNA (remote access, formerly SDP) licence to every snapshot. They appear as one more group, **Cato ZTNA users** (badge "Cato"), in the dashboard, all reports and Excel, and can have a friendly name. Switching it off keeps its history.
+
+- **Who is counted:** every user in the Cato account who is eligible for licensed remote access (`hasRemoteAccessEligibility` in Cato's `userList`). Name, email, job title and department come from Cato. **Account status** is Enabled when the Cato user is Active, and Disabled when they're Disabled or Locked. So **Disabled accounts** shows licences held by people who can't use them.
+- **Licences purchased and allocated:** each snapshot also stores Cato's own ZTNA licence totals (`licensing › globalLicenseAllocations › ztnaUsers`). The dashboard shows "412 of 500 allocated" on the Cato tile, and the Excel summary sheets get **Licences purchased** and **Licences allocated (vendor)** columns. Cato's allocated figure can differ a little from the number of eligible users. Cato marks the licensing query as beta, so if it fails the users are still recorded; the snapshot log notes the problem, and the columns are blank for that day.
+- **The same person is counted once:** for users Cato imported from Entra, their Entra object ID is looked up through Microsoft Graph and turned into their AD objectGUID, as for Entra groups. Someone in an AD group and holding a Cato licence is then one person in "People in at least one group". This needs the Graph **Application** permission `User.Read.All` described under Entra groups. If Graph can't be read, the Cato read fails and is retried, rather than recording people under different IDs for a day. Users with no Entra link are recorded under their Cato user ID.
+- **Account ID and API key:** enter them under **Admin › Settings › Cato API**. Use a **View** (read-only) API key from the Cato Management Application, under Resources › API Keys. If the key has an allowed-IP list, add the server's outbound internet address.
+  - **How the key is protected:** it's encrypted (AES-256-GCM) with a key derived from the app's `SESSION_SECRET`. On the server that lives in app.env, outside the data folder, so the database or a data backup alone can't reveal the Cato key.
+  - **Never shown:** after saving, the key isn't shown again, sent to the browser, logged, or written to a snapshot or the activity log. Leave the box blank to keep it, or paste a new one to replace it. **Remove** deletes both values.
+  - **If `SESSION_SECRET` changes,** the saved key can no longer be decrypted. The Settings page and the snapshot log then say to enter it again.
+- **Cato ZTNA users page:** the dashboard has a **Cato ZTNA users** widget (users now, licences allocated of purchased, change since the 1st), and the Cato tile and row open the page too. It lists, for any month:
+  - the users at the month end, with search;
+  - the month's joiners and leavers, compared with the month before;
+  - a **Month by month** table of users, the change, joined, left, licences and disabled or locked users.
+
+  It uses the same month-end snapshot as the month-end report (the 00:10 snapshot on the 1st; "to date" during the month). **Download CSV** gives that month's users, one per row with the snapshot date, for Excel or other tools. Text that a spreadsheet would treat as a formula is made plain text. **Download Excel** gives the month-by-month table, the users and the joiners and leavers. Both are in the activity log, and Viewers (Finance) can use the page. The page stays after Cato is switched off, showing its history.
+- **Test connection** (on the same card) reads Cato straight away, without saving anything. It shows how many users hold a licence and the licence totals, so you can check the key before the next snapshot.
+- **app.env instead (optional):** if nothing is saved in the app, `CATO_ACCOUNT_ID` and `CATO_API_KEY` in app.env are used instead, and Settings says so. Once the values are saved in the app, they replace app.env's for Cato. `CATO_API_URL` in app.env is only needed if Cato gives you a different address. The default is `https://api.catonetworks.com/api/v1/graphql2`.
+- **Network:** the server needs outbound HTTPS to `api.catonetworks.com`. Throttling and passing faults are retried, and a Cato failure is retried like a domain controller error.
 
 ### Compared with the old script
 
@@ -100,6 +123,8 @@ Settings come from environment variables. On the server they are in `C:\ProgramD
 | `ENTRA_CERT_KEY_PATH` / `ENTRA_CERT_THUMBPRINT` | unset | Certificate credential (preferred) |
 | `ENTRA_CLIENT_SECRET` | unset | Only if no certificate |
 | `SNAPSHOT_TASK` | `LicenceReporting snapshot` | The scheduled task that Take snapshot now starts |
+| `CATO_ACCOUNT_ID` / `CATO_API_KEY` | unset | Only if not entered in Admin › Settings (which takes precedence): Cato account and read-only API key |
+| `CATO_API_URL` | Cato's default | Cato GraphQL endpoint, only if yours differs |
 | `TRUST_PROXY` | unset | The reverse proxy's address, e.g. `10.1.0.233` |
 | `FIREWALL_ALLOW_FROM` | any | Server install only: who can reach `PORT` |
 | `TLS_PFX_PATH` etc. | unset | Serve HTTPS directly instead of behind the proxy |

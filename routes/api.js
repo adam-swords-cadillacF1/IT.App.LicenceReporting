@@ -52,6 +52,8 @@ router.get('/meta', (req, res) => {
     dates: dates.map(d => d.date),
     months: snaps.reportMonths(),
     groups: snaps.monitoredGroups().map(g => ({ name: g.name, label: g.label, source: g.source })),
+    // The Cato page is offered once Cato has been switched on (its history stays after it's switched off)
+    cato: (g => (g ? { name: g.name, label: g.label, monitored: Boolean(g.monitored) } : null))(snaps.catoGroup()),
   });
 });
 
@@ -121,6 +123,35 @@ router.get('/month-end.xlsx', (req, res) => {
   logActivity(who(req), 'Downloaded month-end report', `${r.month} (snapshot ${r.snapshot.date}, ${r.basis})`);
   sendXlsx(res, reports.monthEndWorkbook(r, req.user.name),
     `Licence month end ${reports.monthName(r.month)}${r.basis === 'month-to-date' ? ' (to date)' : ''}.xlsx`);
+});
+
+// ── Cato ZTNA users ──
+
+function catoReport(req, { needMonth = false } = {}) {
+  const report = snaps.catoReport(req.query.month ? String(req.query.month) : null);
+  if (!report) throw fail(404, 'Cato isn\'t switched on. An admin can switch it on under Admin › Groups.');
+  if (needMonth && !report.selected) throw fail(404, 'There are no snapshots with Cato in them yet');
+  return report;
+}
+
+router.get('/cato', (req, res) => res.json(catoReport(req)));
+
+router.get('/cato/users.csv', (req, res) => {
+  const r = catoReport(req, { needMonth: true });
+  const buffer = reports.catoUsersCsv(r);
+  logActivity(who(req), 'Downloaded Cato users (CSV)', `${r.selected.month} (snapshot ${r.selected.date})`);
+  res.set({
+    'Content-Type': 'text/csv; charset=utf-8',
+    'Content-Disposition': `attachment; filename="Cato ZTNA users ${r.selected.date}.csv"`,
+    'Content-Length': buffer.length,
+  });
+  res.end(buffer);
+});
+
+router.get('/cato.xlsx', (req, res) => {
+  const r = catoReport(req, { needMonth: true });
+  logActivity(who(req), 'Downloaded Cato users report', `${r.selected.month} (snapshot ${r.selected.date})`);
+  sendXlsx(res, reports.catoWorkbook(r, req.user.name), `Cato ZTNA users ${reports.monthName(r.selected.month)}.xlsx`);
 });
 
 // ── Admin (IT) ───────────────────────────────────────────────────────────────
@@ -205,6 +236,67 @@ router.put('/admin/entra-groups', adminOnly, async (req, res, next) => {
     res.json({ groups: saved,
       warning: synced.length ? `Synced from AD: ${synced.join(', ')}. These are usually better in the AD list, which also sees nested AD groups.` : null });
   } catch (err) { next(err); }
+});
+
+// ── Cato ZTNA licence holders ──
+
+// Never includes the API key: only whether one is saved, and where the settings come from
+function catoStatus() {
+  const cato = require('../lib/cato');
+  const saved = require('../lib/cato-settings').stored();
+  const group = snaps.catoGroup();
+  const s = cato.settings(process.env, saved);
+  return { configured: Boolean(s.apiKey && s.accountId), enabled: Boolean(group?.monitored), name: group?.name || snaps.CATO_GROUP_NAME,
+    label: group?.label || null, accountId: s.accountId || null, apiUrl: s.url, source: s.source,
+    keySaved: saved.keySaved, keyError: s.keyError, updatedBy: saved.updatedBy || null, updatedAt: saved.updatedAt || null };
+}
+
+router.get('/admin/cato', adminOnly, (req, res) => res.json(catoStatus()));
+
+router.put('/admin/cato', adminOnly, (req, res) => {
+  if (typeof req.body?.enabled !== 'boolean') throw fail(400, 'Send enabled: true or false');
+  const before = catoStatus().enabled;
+  snaps.setCatoMonitored(req.body.enabled);
+  if (before !== req.body.enabled) logActivity(who(req), req.body.enabled ? 'Switched Cato licences on' : 'Switched Cato licences off');
+  res.json(catoStatus());
+});
+
+// The account ID and API key, from Admin › Settings. A blank apiKey keeps the saved key.
+router.put('/admin/cato-settings', adminOnly, (req, res) => {
+  const changes = require('../lib/cato-settings').save(req.body, who(req));
+  if (changes.length) logActivity(who(req), 'Changed the Cato API settings', changes.join('; '));
+  res.json(catoStatus());
+});
+
+router.delete('/admin/cato-settings', adminOnly, (req, res) => {
+  if (require('../lib/cato-settings').clear()) logActivity(who(req), 'Removed the Cato API settings');
+  res.json(catoStatus());
+});
+
+// Reads Cato now, without saving anything, so IT can check the key and account before the next snapshot.
+// Answers with counts only (no names), and the licence totals.
+router.post('/admin/cato/test', adminOnly, async (req, res, next) => {
+  try {
+    const cato = require('../lib/cato');
+    if (!cato.isConfigured()) throw fail(400, cato.NOT_CONFIGURED);
+    const client = cato.client();
+    const users = await client.allUsers();
+    const licensed = users.filter(u => u?.hasRemoteAccessEligibility === true);
+    let licences = null;
+    let licenceError = null;
+    try { licences = await client.ztnaLicences(); } catch (err) { licenceError = err.message; }
+    logActivity(who(req), 'Tested the Cato connection', `${licensed.length} licensed of ${users.length} users`);
+    res.json({
+      users: users.length,
+      licensed: licensed.length,
+      disabledLicensed: licensed.filter(u => u.userStatus !== 'ACTIVE').length,
+      withEntraId: licensed.filter(u => u.objectId).length,
+      licences, licenceError,
+    });
+  } catch (err) {
+    // Shown to the admin as it is (a 5xx would be replaced by a generic message); Cato errors never hold the key
+    next(err.status ? err : fail(424, err.message));
+  }
 });
 
 router.get('/admin/snapshots', adminOnly, (req, res) => res.json(snaps.snapshotList()));

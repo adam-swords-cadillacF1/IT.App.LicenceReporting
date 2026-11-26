@@ -8,7 +8,6 @@ process.env.TZ = process.env.APP_TZ || 'Europe/London';
 
 const fs = require('node:fs');
 const path = require('node:path');
-const crypto = require('node:crypto');
 const https = require('node:https');
 const express = require('express');
 const session = require('express-session');
@@ -51,12 +50,8 @@ if (AUTH_MODE === 'entra') {
   }
 }
 
-function sessionSecret() {
-  if (process.env.SESSION_SECRET) return process.env.SESSION_SECRET;
-  const file = path.join(DATA_DIR, 'session-secret');
-  if (!fs.existsSync(file)) fs.writeFileSync(file, crypto.randomBytes(48).toString('hex'), { mode: 0o600 });
-  return fs.readFileSync(file, 'utf8').trim();
-}
+// SESSION_SECRET, or a generated one in the data folder (lib/secrets.js, which also encrypts stored secrets with it)
+const { masterSecret: sessionSecret } = require('./lib/secrets');
 
 const app = express();
 app.locals.authMode = AUTH_MODE;

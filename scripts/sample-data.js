@@ -51,14 +51,14 @@ const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())
 
 // Returns one snapshot object per day from start to end (inclusive). The state evolves day by day from
 // a fixed seed, so a later call for a single day matches the history.
-// groups: names (AD) or { name, source, entraId } as returned by monitoredGroups()
+// groups: names (AD) or { name, source, entraId } as returned by monitoredGroups(); source 'cato' adds licence totals
 function generate({ groups: groupList, endDate = ymd(new Date()), days = 120, startDate = '2026-01-01' } = {}) {
   const defs = groupList.map(g => (typeof g === 'string' ? { name: g, source: 'ad' } : g));
   const groups = defs.map(g => g.name);
   const rand = rng(42);
   const people = makePeople(rand, 420);
   // Each group gets a base share of people; E3/E5 are big, add-ons small
-  const share = name => (/E3/.test(name) ? 0.55 : /E5-License/.test(name) ? 0.3 : /E5Monthly/.test(name) ? 0.05
+  const share = name => (/Cato/.test(name) ? 0.45 : /E3/.test(name) ? 0.55 : /E5-License/.test(name) ? 0.3 : /E5Monthly/.test(name) ? 0.05
     : /CoPilot|Acrobat/.test(name) ? 0.2 : 0.06);
   const membership = new Map(groups.map(g => [g, new Set(people.filter(() => rand() < share(g)).map(p => p.id))]));
   const out = [];
@@ -84,6 +84,8 @@ function generate({ groups: groupList, endDate = ymd(new Date()), days = 120, st
       computer: 'SAMPLE-DATA', runAs: 'sample-data.js',
       groups: defs.map(({ name, source, entraId }) => ({
         name, found: true, error: null, ...(source === 'entra' ? { source, entraId } : {}),
+        // Cato reports how many ZTNA licences were bought and allocated; allocated runs a little ahead of eligible users
+        ...(source === 'cato' ? { source, licences: { total: 250, used: Math.min(250, membership.get(name).size + 3) } } : {}),
         members: [...membership.get(name)].map(id => ({ ...people.find(p => p.id === id) })),
       })),
     };

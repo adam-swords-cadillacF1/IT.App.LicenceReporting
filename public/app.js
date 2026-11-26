@@ -65,7 +65,12 @@ function download(url) {
 // A group as people know it: the friendly name, with the real AD/Entra group it looks up underneath
 const groupCell = (name, label) => (label ? `${esc(label)}<div class="sub-name">${esc(name)}</div>` : esc(name));
 const groupTitle = name => state.meta.groups.find(g => g.name === name)?.label || name;
-const entraBadge = g => (g.source === 'entra' ? ' <span class="badge">Entra</span>' : '');
+const SOURCE_NAMES = { ad: 'AD', entra: 'Entra ID', cato: 'Cato' };
+const entraBadge = g => (g.source === 'entra' ? ' <span class="badge">Entra</span>' : g.source === 'cato' ? ' <span class="badge">Cato</span>' : '');
+// Licence totals a vendor reports for a group (Cato ZTNA): "412 of 500 allocated", or "500 purchased"
+const hasLicences = g => g.licenceTotal !== null && g.licenceTotal !== undefined;
+const licenceText = g => (!hasLicences(g) ? '—' : g.licenceUsed === null || g.licenceUsed === undefined
+  ? `${num(g.licenceTotal)} purchased` : `${num(g.licenceUsed)} of ${num(g.licenceTotal)} allocated`);
 
 const snapshotBadge = s => {
   if (!s) return '';
@@ -151,6 +156,7 @@ async function renderDashboard() {
   }
   const monthLabel = d.monthStart ? fmtDayMonth(d.monthStart) : null;
   const total = d.groups.reduce((n, g) => n + (g.count || 0), 0);
+  const licenceCol = d.groups.some(hasLicences);
 
   view.innerHTML = `
     <div class="page-head">
@@ -166,14 +172,16 @@ async function renderDashboard() {
         <div class="sub">Each person counted once</div></div>
       <div class="tile"><div class="label">Licence assignments</div><div class="value">${num(total)}</div>
         <div class="sub">Members across all ${d.groups.length} groups</div></div>
+      ${catoWidget(d.groups.find(g => g.source === 'cato'), monthLabel)}
     </div>
     <div class="group-tiles">
       ${d.groups.map(g => `
-        <a class="tile group-tile" href="#/members?group=${encodeURIComponent(g.name)}" title="See the members of ${esc(g.label || g.name)}">
+        <a class="tile group-tile" href="${groupHref(g)}" title="See the members of ${esc(g.label || g.name)}">
           <div class="label"><span>${esc(g.label || g.name)}${entraBadge(g)}${g.label ? `<div class="sub-name">${esc(g.name)}</div>` : ''}</span></div>
           ${g.count === null
             ? `<div class="problem"><span class="badge crit"><span class="status-icon">✕</span>Not read</span>${esc(g.problem || '')}</div>`
             : `<div class="value">${num(g.count)}</div>
+               ${hasLicences(g) ? `<div class="sub">Licences: ${licenceText(g)}, as ${esc(SOURCE_NAMES[g.source] || g.source)} reports</div>` : ''}
                <div class="deltas">
                  <span>${signed(g.sinceYesterday)} since yesterday</span>
                  ${monthLabel ? `<span>${signed(g.sinceMonthStart)} since ${esc(monthLabel)}</span>` : ''}
@@ -185,19 +193,118 @@ async function renderDashboard() {
       <div class="card-head"><h2>All groups</h2><span class="muted">Same figures as the tiles</span></div>
       <div class="table-wrap"><table class="table">
         <thead><tr><th>Group</th><th class="num">Members</th><th class="num">Since yesterday</th>
-          ${monthLabel ? `<th class="num">Since ${esc(monthLabel)}</th>` : ''}<th class="num">Disabled accounts</th><th>Problem</th></tr></thead>
+          ${monthLabel ? `<th class="num">Since ${esc(monthLabel)}</th>` : ''}<th class="num">Disabled accounts</th>
+          ${licenceCol ? '<th class="num" title="Allocated of purchased, as the vendor reports">Licences</th>' : ''}<th>Problem</th></tr></thead>
         <tbody>${d.groups.map(g => `
-          <tr class="row-link" data-group="${esc(g.name)}"><td>${groupCell(g.name, g.label)}${entraBadge(g)}</td><td class="num">${num(g.count)}</td>
+          <tr class="row-link" data-href="${esc(groupHref(g))}"><td>${groupCell(g.name, g.label)}${entraBadge(g)}</td><td class="num">${num(g.count)}</td>
             <td class="num">${signed(g.sinceYesterday)}</td>${monthLabel ? `<td class="num">${signed(g.sinceMonthStart)}</td>` : ''}
-            <td class="num">${num(g.disabled)}</td><td>${esc(g.problem || '')}</td></tr>`).join('')}
+            <td class="num">${num(g.disabled)}</td>${licenceCol ? `<td class="num">${licenceText(g)}</td>` : ''}<td>${esc(g.problem || '')}</td></tr>`).join('')}
         </tbody>
       </table></div>
-      <p class="count-note">Disabled accounts are members whose AD account is disabled but who are still in the group.</p>
+      <p class="count-note">Disabled accounts are members whose account is disabled but who are still in the group (or, for Cato, still licensed).</p>
     </div>`;
   wireSparklines(view);
-  view.querySelectorAll('tr[data-group]').forEach(tr => tr.addEventListener('click', () => {
-    location.hash = `#/members?group=${encodeURIComponent(tr.dataset.group)}`;
-  }));
+  view.querySelectorAll('tr[data-href]').forEach(tr => tr.addEventListener('click', () => { location.hash = tr.dataset.href; }));
+}
+
+// The Cato group opens its own page (users and month-to-month change); other groups open Members on a date
+const groupHref = g => (g.source === 'cato' ? '#/cato' : `#/members?group=${encodeURIComponent(g.name)}`);
+
+// Dashboard widget: the number of Cato ZTNA users now, linking to the Cato page
+function catoWidget(g, monthLabel) {
+  if (!g) return '';
+  const notes = g.count === null ? [g.problem || 'Not read in the latest snapshot']
+    : [hasLicences(g) ? `Licences: ${licenceText(g)}` : null,
+      monthLabel && g.sinceMonthStart !== null ? `${signed(g.sinceMonthStart)} since ${monthLabel}` : null].filter(Boolean);
+  return `<a class="tile" href="#/cato" title="See the Cato ZTNA users and the change month to month">
+    <div class="label">${esc(g.label || 'Cato ZTNA users')} <span class="badge">Cato</span></div>
+    <div class="value">${g.count === null ? '—' : num(g.count)}</div>
+    <div class="sub">${notes.map(esc).join(' · ') || 'Users holding a remote access licence'}</div></a>`;
+}
+
+// ── Cato ZTNA users ──────────────────────────────────────────────────────────
+
+const catoBasis = m => (m.basis === 'month-end' ? `Month end: snapshot of ${fmtDate(m.date)}`
+  : m.basis === 'month-to-date' ? `So far this month: snapshot of ${fmtDate(m.date)}` : `Last snapshot in the month: ${fmtDate(m.date)}`);
+const changeCell = (n, sign) => (n === null ? '—' : n ? `${sign}${num(n)}` : '0');
+
+async function renderCato(params) {
+  let r;
+  try {
+    r = await api('GET', `/api/cato${params.get('month') ? `?month=${encodeURIComponent(params.get('month'))}` : ''}`);
+  } catch (err) {
+    view.innerHTML = `<div class="page-head"><div><h1>Cato ZTNA users</h1></div></div>${alertBox(err.status === 404 ? 'info' : 'crit', esc(err.message))}`;
+    return;
+  }
+  const title = r.group.label || r.group.name;
+  const head = `<div class="page-head"><div><h1>${esc(title)} <span class="badge">Cato</span></h1>
+    <p>Users holding a Cato ZTNA (remote access) licence, and how the number changes from month to month.</p></div>`;
+  const off = r.group.monitored ? '' : alertBox('warn', 'Cato is switched off, so no new snapshots include it. This is its history.');
+  if (!r.selected) {
+    view.innerHTML = `${head}</div>${off}${alertBox('info', `No snapshot includes Cato yet. It's read with the daily snapshot at 00:10${state.me.role === 'admin' ? ', or take one now from <a href="#/admin?tab=snapshots">Admin</a>' : ''}.`)}`;
+    return;
+  }
+  const sel = r.selected;
+  const changes = [...sel.joined.map(m => ({ ...m, change: 'Joined' })), ...sel.left.map(m => ({ ...m, change: 'Left' }))];
+  view.innerHTML = `${head}
+      <div class="actions"><button id="dl-csv" class="btn" type="button">Download CSV</button>
+        <button id="dl-xlsx" class="btn primary" type="button">Download Excel</button></div></div>
+    ${off}
+    <div class="filters">
+      <div class="field"><label for="f-month">Month</label><select id="f-month">${r.months.map(m =>
+        `<option value="${m.month}" ${m.month === sel.month ? 'selected' : ''}>${esc(monthName(m.month))}${m.basis === 'month-to-date' ? ' (to date)' : ''}</option>`).join('')}</select></div>
+    </div>
+    ${alertBox(sel.basis === 'month-end' ? 'info' : 'warn', `${esc(catoBasis(sel))}.${sel.basis === 'month-to-date' ? ' The month isn\'t over yet.' : ''}`)}
+    ${sel.problem ? alertBox('crit', `Cato couldn't be read in this snapshot: ${esc(sel.problem)}`) : ''}
+    <div class="hero-row">
+      <div class="tile"><div class="label">Users</div><div class="value">${num(sel.count)}</div>
+        <div class="sub">Holding a ZTNA licence</div>${sparkline(r.series)}</div>
+      <div class="tile"><div class="label">Change from the month before</div><div class="value">${sel.net === null ? '—' : signed(sel.net)}</div>
+        <div class="sub">${sel.previousDate ? `${changeCell(sel.added, '+')} joined, ${changeCell(sel.removed, '−')} left since ${esc(fmtDate(sel.previousDate))}` : 'No earlier month to compare with'}</div></div>
+      <div class="tile"><div class="label">Licences</div><div class="value">${hasLicences(sel) ? `${num(sel.licenceUsed)} / ${num(sel.licenceTotal)}` : '—'}</div>
+        <div class="sub">${hasLicences(sel) ? 'Allocated of purchased, as Cato reports' : 'Cato\'s licence figures weren\'t read'}</div></div>
+      <div class="tile"><div class="label">Disabled or locked</div><div class="value">${num(sel.disabled)}</div>
+        <div class="sub">Users still holding a licence</div></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>Month by month</h2><span class="muted">Users at each month end; click a month to see its users</span></div>
+      <div class="table-wrap"><table class="table">
+        <thead><tr><th>Month</th><th>Figures from</th><th class="num">Users</th><th class="num">Change</th><th class="num">Joined</th><th class="num">Left</th>
+          <th class="num" title="Allocated of purchased, as Cato reports">Licences</th><th class="num">Disabled or locked</th><th>Problem</th></tr></thead>
+        <tbody>${r.months.map(m => `<tr class="row-link${m.month === sel.month ? ' selected' : ''}" data-month="${m.month}">
+          <td class="nowrap">${esc(monthName(m.month))}</td><td>${esc(catoBasis(m))}</td><td class="num">${num(m.count)}</td>
+          <td class="num">${m.net === null ? '—' : signed(m.net)}</td><td class="num">${changeCell(m.added, '+')}</td><td class="num">${changeCell(m.removed, '−')}</td>
+          <td class="num">${hasLicences(m) ? `${num(m.licenceUsed)} / ${num(m.licenceTotal)}` : '—'}</td><td class="num">${num(m.disabled)}</td>
+          <td>${esc(m.problem || '')}</td></tr>`).join('')}</tbody>
+      </table></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>Joiners and leavers in ${esc(monthName(sel.month))}</h2>
+        <span class="muted">${sel.previousDate ? `Compared with ${esc(fmtDate(sel.previousDate))}` : 'No earlier month to compare with'}</span></div>
+      <div class="table-wrap"><table class="table"><thead>${memberHead({ withGroup: false, change: true })}</thead>
+        <tbody>${memberRows(changes, { withGroup: false, change: true }) || `<tr><td colspan="6" class="muted">${sel.previousDate ? 'Nobody joined or left.' : '—'}</td></tr>`}</tbody></table></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>Users in ${esc(monthName(sel.month))}</h2><span class="muted" id="user-count"></span></div>
+      <div class="filters"><div class="field grow"><label for="f-search">Search</label>
+        <input id="f-search" type="search" placeholder="Name, email, job title, department…"></div></div>
+      <div class="table-wrap"><table class="table"><thead>${memberHead({ withGroup: false })}</thead><tbody id="user-rows"></tbody></table></div>
+    </div>`;
+  const search = document.getElementById('f-search');
+  const drawUsers = () => {
+    const q = search.value.trim().toLowerCase();
+    const rows = q ? sel.rows.filter(m => [m.name, m.email, m.username, m.title, m.department].some(v => String(v || '').toLowerCase().includes(q))) : sel.rows;
+    document.getElementById('user-rows').innerHTML = memberRows(rows, { withGroup: false }) || '<tr><td colspan="5" class="muted">Nobody matches.</td></tr>';
+    document.getElementById('user-count').textContent = q ? `${num(rows.length)} of ${num(sel.rows.length)} shown` : `${num(sel.rows.length)} users`;
+  };
+  search.addEventListener('input', drawUsers);
+  drawUsers();
+  wireSparklines(view);
+  const pick = month => { location.hash = `#/cato?month=${month}`; };
+  document.getElementById('f-month').addEventListener('change', e => pick(e.target.value));
+  view.querySelectorAll('tr[data-month]').forEach(tr => tr.addEventListener('click', () => pick(tr.dataset.month)));
+  document.getElementById('dl-csv').addEventListener('click', () => download(`/api/cato/users.csv?month=${sel.month}`));
+  document.getElementById('dl-xlsx').addEventListener('click', () => download(`/api/cato.xlsx?month=${sel.month}`));
 }
 
 // ── Members on a date ────────────────────────────────────────────────────────
@@ -348,6 +455,7 @@ async function renderMonthEnd(params) {
     try {
       const r = await api('GET', `/api/month-end?month=${fMonth.value}`);
       const total = r.groups.reduce((n, g) => n + (g.count || 0), 0);
+      const licenceCol = r.groups.some(hasLicences);
       const kind = r.basis === 'month-end' ? 'info' : 'warn';
       result.innerHTML = `
         ${alertBox(kind, BASIS[r.basis](r.snapshot))}
@@ -356,12 +464,12 @@ async function renderMonthEnd(params) {
           <div class="card-head"><h2>${esc(monthName(r.month))}</h2><span class="muted">${r.previous ? `Joined and left compared with ${esc(fmtDate(r.previous.date))}` : ''}</span></div>
           <div class="table-wrap"><table class="table">
             <thead><tr><th>Group</th><th class="num">Members</th><th class="num">Joined in month</th><th class="num">Left in month</th>
-              <th class="num">Disabled accounts</th><th>Problem</th></tr></thead>
+              <th class="num">Disabled accounts</th>${licenceCol ? '<th class="num" title="Allocated of purchased, as the vendor reports">Licences</th>' : ''}<th>Problem</th></tr></thead>
             <tbody>${r.groups.map(g => `<tr><td>${groupCell(g.name, g.label)}${entraBadge(g)}</td><td class="num">${g.problem ? '—' : num(g.count)}</td>
               <td class="num">${g.added === null ? '—' : g.added ? `+${num(g.added)}` : '0'}</td>
               <td class="num">${g.removed === null ? '—' : g.removed ? `−${num(g.removed)}` : '0'}</td>
-              <td class="num">${g.problem ? '—' : num(g.disabled)}</td><td>${esc(g.problem || '')}</td></tr>`).join('')}
-              <tr><td><strong>Total (licence assignments)</strong></td><td class="num"><strong>${num(total)}</strong></td><td colspan="4"></td></tr>
+              <td class="num">${g.problem ? '—' : num(g.disabled)}</td>${licenceCol ? `<td class="num">${licenceText(g)}</td>` : ''}<td>${esc(g.problem || '')}</td></tr>`).join('')}
+              <tr><td><strong>Total (licence assignments)</strong></td><td class="num"><strong>${num(total)}</strong></td><td colspan="${licenceCol ? 5 : 4}"></td></tr>
             </tbody></table></div>
           <p class="count-note">The workbook has a summary sheet, every member in one sheet, the month's joiners and leavers, and one sheet per group.</p>
         </div>`;
@@ -410,7 +518,8 @@ async function adminSnapshots(el) {
     e.target.disabled = true;
     try {
       const r = await api('POST', '/api/admin/snapshot-now');
-      toast(r.mode === 'task' ? 'Snapshot started. It usually takes under a minute; this page refreshes when it arrives.' : 'Sample snapshot taken (development).');
+      toast(r.mode === 'task' ? 'Snapshot started. It usually takes under a minute; this page refreshes when it arrives.'
+        : `Sample snapshot taken (development)${r.cato === 'live' ? ', with the Cato group read from the real Cato API' : r.cato === 'sample' ? '; Cato isn\'t configured here, so its group is made up' : ''}.`);
       const started = Date.now();
       const poll = async () => {
         state.meta = await api('GET', '/api/meta');
@@ -427,8 +536,8 @@ async function adminSnapshots(el) {
 }
 
 async function adminGroups(el) {
-  const [groups, entra, labels] = await Promise.all([api('GET', '/api/admin/groups'), api('GET', '/api/admin/entra-groups'),
-    api('GET', '/api/admin/group-labels')]);
+  const [groups, entra, labels, cato] = await Promise.all([api('GET', '/api/admin/groups'), api('GET', '/api/admin/entra-groups'),
+    api('GET', '/api/admin/group-labels'), api('GET', '/api/admin/cato')]);
   const entraLines = list => list.map(g => `${g.name}  (${g.id})`).join('\n');
   el.innerHTML = `
     <div class="card">
@@ -438,7 +547,7 @@ async function adminGroups(el) {
       up by their real name, so this never changes what is counted.</p>
       <div class="table-wrap"><table class="table">
         <thead><tr><th>Group it looks up</th><th>Source</th><th style="width:45%">Friendly name</th></tr></thead>
-        <tbody>${labels.map(g => `<tr><td class="mono">${esc(g.name)}</td><td>${g.source === 'entra' ? 'Entra ID' : 'AD'}</td>
+        <tbody>${labels.map(g => `<tr><td class="mono">${esc(g.name)}</td><td>${esc(SOURCE_NAMES[g.source] || g.source)}</td>
           <td><input type="text" maxlength="80" data-label-id="${g.id}" value="${esc(g.label || '')}" aria-label="Friendly name for ${esc(g.name)}"></td></tr>`).join('')}
         </tbody></table></div>
       <div class="actions" style="margin-top:10px"><button id="save-labels" class="btn primary" type="button">Save friendly names</button></div>
@@ -462,6 +571,19 @@ async function adminGroups(el) {
       <div class="actions" style="margin-top:10px"><button id="save-entra" class="btn primary" type="button">Save Entra groups</button>
         <span class="muted">Needs the app's Graph permissions; if they're missing, saving says so.</span></div>
       <div id="entra-msg"></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>Cato ZTNA users</h2><span class="muted">Remote access licences, read through the Cato API</span></div>
+      <p>When this is on, each snapshot lists the Cato users who hold a ZTNA (remote access) licence, as one more group, with
+      the number of licences purchased and allocated. It shows in the dashboard and reports like any other group, and can have a
+      friendly name. Switching it off keeps its history. The account ID and API key are entered under
+      <a href="#/admin?tab=settings">Admin › Settings</a>, where you can also test the connection.</p>
+      ${cato.keyError ? alertBox('crit', esc(cato.keyError))
+        : cato.configured ? `<p class="muted">Account ${esc(cato.accountId)}${cato.source === 'app.env' ? ' (from app.env)' : ''}</p>`
+          : alertBox('warn', 'Cato isn\'t set up yet: enter the account ID and API key under <a href="#/admin?tab=settings">Admin › Settings</a>. Until then, snapshots show the Cato group as not read.')}
+      <div class="field"><label><input type="checkbox" id="cato-on" ${cato.enabled ? 'checked' : ''}> Include Cato ZTNA licence holders in snapshots</label></div>
+      <div class="actions" style="margin-top:10px"><button id="save-cato" class="btn primary" type="button">Save</button>
+        <span class="muted">Applies from the next snapshot.</span></div>
     </div>`;
   document.getElementById('save-labels').addEventListener('click', async () => {
     try {
@@ -482,6 +604,14 @@ async function adminGroups(el) {
       redraw();
     } catch (err) { toast(err.message, true); }
   });
+  document.getElementById('save-cato').addEventListener('click', async () => {
+    try {
+      const r = await api('PUT', '/api/admin/cato', { enabled: document.getElementById('cato-on').checked });
+      state.meta = await api('GET', '/api/meta');
+      toast(r.enabled ? 'Cato licences will be in the next snapshot.' : 'Cato licences switched off. Their history is kept.');
+      redraw();
+    } catch (err) { toast(err.message, true); }
+  });
   document.getElementById('save-entra').addEventListener('click', async e => {
     const msg = document.getElementById('entra-msg');
     msg.innerHTML = '';
@@ -499,8 +629,43 @@ async function adminGroups(el) {
   });
 }
 
+// What the Cato connection test found, as one line
+function catoTestText(r) {
+  const lic = r.licences
+    ? `${num(r.licences.total)} ZTNA licences purchased${r.licences.used === null ? '' : `, ${num(r.licences.used)} allocated`}${r.licences.available === null ? '' : `, ${num(r.licences.available)} available`}.`
+    : `Licence totals not read${r.licenceError ? `: ${esc(r.licenceError)}` : ''}.`;
+  return `Connected. ${num(r.licensed)} of ${num(r.users)} Cato users hold a licence${r.disabledLicensed ? ` (${num(r.disabledLicensed)} of them disabled or locked)` : ''}; ${num(r.withEntraId)} are linked to Entra, so they are matched to the same person in AD and Entra groups. ${lic}`;
+}
+
+function catoSettingsCard(c) {
+  const status = c.keyError ? alertBox('crit', esc(c.keyError))
+    : c.source === 'settings' ? `<p class="muted">Saved${c.updatedBy ? ` by ${esc(c.updatedBy)}` : ''}${c.updatedAt ? ` on ${esc(fmtDateTime(c.updatedAt))}` : ''}.${c.keySaved ? ' The API key is stored encrypted and is never shown again.' : ''}</p>`
+      : c.source === 'app.env' ? alertBox('info', 'These come from the server\'s app.env at the moment. Saving here replaces them; app.env is then ignored for Cato.')
+        : '';
+  return `
+    <div class="card">
+      <div class="card-head"><h2>Cato API</h2><span class="muted">For the Cato ZTNA licence holders (Admin › Groups)</span></div>
+      <p>Make a <strong>View</strong> (read-only) API key in the Cato Management Application under Resources › API Keys, and enter it
+      here with the account ID. If the key only allows certain addresses, add this server's outbound internet address.</p>
+      ${status}
+      <div class="filters">
+        <div class="field"><label for="cato-account">Account ID</label>
+          <input id="cato-account" type="text" autocomplete="off" spellcheck="false" maxlength="40" value="${esc(c.accountId || '')}" style="width:180px"></div>
+        <div class="field grow"><label for="cato-key">API key</label>
+          <input id="cato-key" type="password" autocomplete="new-password" spellcheck="false" maxlength="512"
+            placeholder="${c.source === 'settings' && c.keySaved && !c.keyError ? 'Saved (hidden). Leave blank to keep it, or paste a new key' : 'Paste the API key'}"></div>
+      </div>
+      <div class="actions" style="margin-top:10px">
+        <button id="cato-save" class="btn primary" type="button">Save</button>
+        <button id="cato-test" class="btn" type="button" ${c.configured ? '' : 'disabled'}>Test connection</button>
+        ${c.source === 'settings' ? '<button id="cato-remove" class="btn ghost" type="button">Remove</button>' : ''}
+      </div>
+      <div id="cato-msg"></div>
+    </div>`;
+}
+
 async function adminSettings(el) {
-  const s = await api('GET', '/api/admin/settings');
+  const [s, cato] = await Promise.all([api('GET', '/api/admin/settings'), api('GET', '/api/admin/cato')]);
   el.innerHTML = `
     <div class="card">
       <div class="card-head"><h2>Retention</h2></div>
@@ -509,7 +674,39 @@ async function adminSettings(el) {
       <div class="filters"><div class="field"><label for="ret">Keep snapshots for (months)</label>
         <input id="ret" type="text" inputmode="numeric" value="${s.retentionMonths}" style="width:120px"></div>
         <div class="field"><label>&nbsp;</label><button id="save" class="btn primary" type="button">Save</button></div></div>
-    </div>`;
+    </div>
+    ${catoSettingsCard(cato)}`;
+  const catoMsg = () => document.getElementById('cato-msg');
+  document.getElementById('cato-save').addEventListener('click', async e => {
+    e.target.disabled = true;
+    try {
+      const keyInput = document.getElementById('cato-key');
+      await api('PUT', '/api/admin/cato-settings', { accountId: document.getElementById('cato-account').value, apiKey: keyInput.value });
+      keyInput.value = '';
+      toast('Cato settings saved.');
+      await adminSettings(el);
+    } catch (err) {
+      catoMsg().innerHTML = alertBox('crit', esc(err.message));
+      e.target.disabled = false;
+    }
+  });
+  document.getElementById('cato-test').addEventListener('click', async e => {
+    catoMsg().innerHTML = '<p class="loading">Reading Cato…</p>';
+    e.target.disabled = true;
+    try {
+      catoMsg().innerHTML = alertBox('info', catoTestText(await api('POST', '/api/admin/cato/test')));
+    } catch (err) {
+      catoMsg().innerHTML = alertBox('crit', esc(err.message));
+    } finally { e.target.disabled = false; }
+  });
+  document.getElementById('cato-remove')?.addEventListener('click', async () => {
+    if (!confirm('Remove the Cato account ID and API key from the app? Cato snapshots stop until they are entered again (or set in app.env).')) return;
+    try {
+      await api('DELETE', '/api/admin/cato-settings');
+      toast('Cato settings removed.');
+      await adminSettings(el);
+    } catch (err) { toast(err.message, true); }
+  });
   const save = async confirmDelete => {
     try {
       const r = await api('PUT', '/api/admin/settings', { retentionMonths: Number(document.getElementById('ret').value), confirmDelete });
@@ -532,7 +729,7 @@ async function adminActivity(el) {
 
 // ── Shell ────────────────────────────────────────────────────────────────────
 
-const PAGES = { dashboard: renderDashboard, members: renderMembers, compare: renderCompare, 'month-end': renderMonthEnd, admin: renderAdmin };
+const PAGES = { dashboard: renderDashboard, members: renderMembers, compare: renderCompare, 'month-end': renderMonthEnd, cato: renderCato, admin: renderAdmin };
 
 async function route() {
   const { page, params } = parseHash();
@@ -542,6 +739,7 @@ async function route() {
   view.innerHTML = '<p class="loading">Loading…</p>';
   try {
     state.meta = await api('GET', '/api/meta');
+    document.querySelectorAll('.cato-only').forEach(el => el.classList.toggle('hidden', !state.meta.cato));
     await render(params);
   } catch (err) {
     view.innerHTML = alertBox('crit', esc(err.message));

@@ -15,7 +15,8 @@ let server;
 
 test.before(async () => {
   // Sample snapshots go in first, so the server imports them as it starts
-  const env = { ...process.env, DATA_DIR, PORT: String(PORT), AUTH_MODE: 'dev', APP_CONFIG: '' };
+  // No Cato account here, whatever the developer's own environment has
+  const env = { ...process.env, DATA_DIR, PORT: String(PORT), AUTH_MODE: 'dev', APP_CONFIG: '', CATO_API_KEY: '', CATO_ACCOUNT_ID: '' };
   await new Promise((resolve, reject) => {
     const gen = spawn(process.execPath, ['scripts/sample-data.js', '75'], { cwd: ROOT, env, stdio: 'ignore' });
     gen.on('exit', code => (code === 0 ? resolve() : reject(new Error(`sample-data exited ${code}`))));
@@ -71,6 +72,94 @@ test('an admin can add Entra groups (looked up without Entra in development) and
   assert.equal((await put({ lines: ['DL-M365-Visio'] })).status, 400);   // same name as an AD group
   const meta = await (await get('/api/meta')).json();
   assert.ok(meta.groups.some(g => g.name === 'Licence - Copilot' && g.source === 'entra'));
+});
+
+test('Cato: only admins see or change it; switching it on reaches the snapshot task; Test says what is missing', async () => {
+  const viewer = await signIn('viewer');
+  assert.equal((await viewer('/api/admin/cato')).status, 403);
+  assert.equal((await viewer('/api/admin/cato/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 403);
+
+  const get = await signIn('admin');
+  const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  assert.deepEqual(await (await get('/api/admin/cato')).json(),
+    { configured: false, enabled: false, name: 'Cato ZTNA users', label: null, accountId: null, apiUrl: 'https://api.catonetworks.com/api/v1/graphql2',
+      source: null, keySaved: false, keyError: null, updatedBy: null, updatedAt: null });
+  assert.equal((await get('/api/admin/cato', json('PUT', { enabled: 'yes' }))).status, 400);
+  assert.equal((await (await get('/api/admin/cato', json('PUT', { enabled: true }))).json()).enabled, true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'groups.json'), 'utf8')).cato, { name: 'Cato ZTNA users' });
+  const meta = await (await get('/api/meta')).json();
+  assert.equal(meta.groups.at(-1).source, 'cato');
+  const tested = await get('/api/admin/cato/test', json('POST', {}));
+  assert.equal(tested.status, 400);
+  assert.match((await tested.json()).error, /account ID and API key in Admin › Settings/);
+  const activity = await (await get('/api/admin/activity')).json();
+  assert.ok(activity.some(a => a.action === 'Switched Cato licences on'));
+});
+
+test('Cato API settings: entered by an admin, the key is never sent back or logged, and can be removed', async () => {
+  const KEY = 'Zy9xWv8uTs7rQp6oNm5lKj4iHg3fEd2c';
+  const viewer = await signIn('viewer');
+  const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  assert.equal((await viewer('/api/admin/cato-settings', json('PUT', { accountId: '4242', apiKey: KEY }))).status, 403);
+  assert.equal((await viewer('/api/admin/cato-settings', json('DELETE', {}))).status, 403);
+
+  const get = await signIn('admin');
+  const bad = await get('/api/admin/cato-settings', json('PUT', { accountId: '4242', apiKey: 'not a key at all, with spaces' }));
+  assert.equal(bad.status, 400);
+  assert.ok(!(await bad.text()).includes('with spaces'));
+  const saved = await get('/api/admin/cato-settings', json('PUT', { accountId: '4242', apiKey: KEY }));
+  assert.equal(saved.status, 200);
+  const text = await saved.text();
+  assert.ok(!text.includes(KEY), 'the key is never sent back');
+  const status = JSON.parse(text);
+  assert.deepEqual([status.configured, status.source, status.accountId, status.keySaved, status.updatedBy], [true, 'settings', '4242', true, 'dev.admin@localhost']);
+  assert.ok(!(await (await get('/api/admin/cato')).text()).includes(KEY));
+  const activity = await (await get('/api/admin/activity')).text();
+  assert.ok(activity.includes('Changed the Cato API settings'));
+  assert.ok(!activity.includes(KEY), 'the key is not in the activity log');
+  // The database and its write-ahead log (recent writes may only be there yet)
+  for (const file of ['licences.db', 'licences.db-wal'].map(f => path.join(DATA_DIR, f)).filter(f => fs.existsSync(f))) {
+    assert.ok(!fs.readFileSync(file).includes(KEY), `the key is not stored in plain text in ${path.basename(file)}`);
+  }
+
+  const removed = await (await get('/api/admin/cato-settings', json('DELETE', {}))).json();
+  assert.deepEqual([removed.configured, removed.source, removed.keySaved], [false, null, false]);
+});
+
+test('Cato page: everyone signed in sees the users and month-to-month change, and can download CSV or Excel', async () => {
+  // Snapshots with Cato in them, on dates before the sample data, written straight into the server's database
+  const catoSnap = (date, ids) => ({ version: 1, date, takenAt: new Date(`${date}T00:10:00Z`).toISOString(), groups: [{
+    name: 'Cato ZTNA users', source: 'cato', found: true, error: null, licences: { total: 100, used: ids.length },
+    members: ids.map(id => ({ id: `cato:${id}`, kind: 'user', username: `${id}@x`, name: `User ${id}`, email: `${id}@example.invalid`, title: '', department: '', enabled: true })),
+  }] });
+  const code = 'const s = require("./lib/snapshots"); for (const x of JSON.parse(process.env.SNAPS)) s.importSnapshot(x);';
+  const out = require('node:child_process').spawnSync(process.execPath, ['-e', code], { cwd: ROOT, env: { ...process.env, DATA_DIR, TZ: 'Europe/London',
+    SNAPS: JSON.stringify([catoSnap('2025-01-01', ['u1', 'u2']), catoSnap('2025-02-01', ['u1', 'u2', 'u3']), catoSnap('2025-02-10', ['u2', 'u3'])]) } });
+  assert.equal(out.status, 0, String(out.stderr));
+
+  const get = await signIn('viewer');
+  assert.deepEqual((await (await get('/api/meta')).json()).cato, { name: 'Cato ZTNA users', label: null, monitored: true });
+  const r = await (await get('/api/cato')).json();
+  assert.deepEqual(r.months.map(m => [m.month, m.count, m.net]), [['2025-02', 2, -1], ['2025-01', 3, 1], ['2024-12', 2, null]]);
+  assert.equal(r.selected.month, '2025-02');
+  assert.deepEqual(r.selected.left.map(m => m.name), ['User u1']);
+  assert.equal((await (await get('/api/cato?month=2025-01')).json()).selected.count, 3);
+  assert.equal((await get('/api/cato?month=bad')).status, 400);
+  assert.equal((await get('/api/cato?month=2030-01')).status, 404);
+
+  const csv = await get('/api/cato/users.csv?month=2025-01');
+  assert.equal(csv.status, 200);
+  assert.equal(csv.headers.get('content-type'), 'text/csv; charset=utf-8');
+  assert.match(csv.headers.get('content-disposition'), /attachment; filename="Cato ZTNA users 2025-02-01\.csv"/);
+  const text = await csv.text();
+  assert.match(text, /^\uFEFF?Name,Email,Username,Job title,Department,Account status,Snapshot date\r\n/);
+  assert.ok(text.includes('User u3,u3@example.invalid,u3@x,,,Enabled,2025-02-01'));
+  const xlsx = await get('/api/cato.xlsx?month=2025-01');
+  assert.equal(xlsx.status, 200);
+  assert.equal(Buffer.from(await xlsx.arrayBuffer()).readUInt32LE(0), 0x04034b50);
+  const activity = await (await (await signIn('admin'))('/api/admin/activity')).json();
+  assert.ok(activity.some(a => a.action === 'Downloaded Cato users (CSV)' && a.detail.startsWith('2025-01')));
+  assert.ok(activity.some(a => a.action === 'Downloaded Cato users report'));
 });
 
 test('friendly names: an admin sets them, they show in the API and Excel, and viewers cannot change them', async () => {

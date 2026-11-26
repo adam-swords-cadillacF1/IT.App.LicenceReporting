@@ -10,6 +10,8 @@
     account name; their details are not readable from this domain)
   - Entra (cloud) groups are read through Microsoft Graph by entra-groups.js (next to this script), run with
     the app's Node.js and settings, signing in with the app's certificate
+  - When switched on in the app, the Cato ZTNA (remote access) licence holders are read through the Cato API by
+    cato-users.js, the same way, with the API key from the app's settings file
   - Writes <DataDir>\snapshots\incoming\<date>_<time>.json, which the app imports within 30 seconds
   - A group that can't be read (e.g. a domain controller error) is tried again, up to -Attempts times,
     -RetryMinutes apart, before the snapshot is written. A group that doesn't exist isn't retried.
@@ -81,7 +83,8 @@ try {
     $list = Get-Content $groupsFile -Raw -Encoding UTF8 | ConvertFrom-Json
     $groupNames = @($list.groups | Where-Object { $_ })
     $entraGroups = @($list.entraGroups | Where-Object { $_ -and $_.id })
-    if (-not $groupNames.Count -and -not $entraGroups.Count) { throw "The group list in $groupsFile is empty." }
+    $catoWanted = [bool]($list.cato -and $list.cato.name)
+    if (-not $groupNames.Count -and -not $entraGroups.Count -and -not $catoWanted) { throw "The group list in $groupsFile is empty." }
     if ($groupNames.Count -and -not $SkipModuleImport) { Import-Module ActiveDirectory -ErrorAction Stop }
 
     # "Take snapshot now" in the app leaves a note of who asked; only trust a recent one
@@ -97,7 +100,7 @@ try {
 
     $who = [Environment]::UserName
     try { $who = [Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { }
-    Write-Log "Snapshot of $($groupNames.Count) AD and $($entraGroups.Count) Entra group(s) as $who$(if ($requestedBy) { ", requested by $requestedBy" })"
+    Write-Log "Snapshot of $($groupNames.Count) AD and $($entraGroups.Count) Entra group(s)$(if ($catoWanted) { ' and the Cato ZTNA users' }) as $who$(if ($requestedBy) { ", requested by $requestedBy" })"
     $userProps = @('DisplayName', 'mail', 'Title', 'Department', 'Enabled', 'ObjectGUID', 'SamAccountName', 'GivenName', 'Surname')
     $contactProps = @('displayName', 'mail', 'title', 'department', 'objectGUID', 'name')
 
@@ -188,15 +191,53 @@ try {
         $out
     }
 
+    # The Cato ZTNA licence holders, in one run of cato-users.js. Files carry the data both ways, as for Entra.
+    function Read-CatoUsers {
+        $req = Join-Path $DataDir 'snapshots\cato-request.json'
+        $res = Join-Path $DataDir 'snapshots\cato-result.json'
+        Remove-Item $res -Force -ErrorAction SilentlyContinue
+        $body = [ordered]@{ config = $list.config; name = [string]$list.cato.name }
+        [IO.File]::WriteAllText($req, ($body | ConvertTo-Json -Depth 3 -Compress), (New-Object System.Text.UTF8Encoding($false)))
+        $node = if ($list.node) { $list.node } else { 'node' }
+        $problem = $null
+        $parsed = $null
+        try {
+            $previous = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            & $node (Join-Path $PSScriptRoot 'cato-users.js') $req $res 2>&1 | Out-Null
+            $code = $LASTEXITCODE
+            $ErrorActionPreference = $previous
+            $parsed = if (Test-Path $res) { ConvertFrom-JsonText ([IO.File]::ReadAllText($res, [Text.Encoding]::UTF8)) } else { $null }
+            if (-not $parsed) { $problem = "cato-users.js wrote no result (exit $code)" }
+            elseif ($parsed['error']) { $problem = [string]$parsed['error'] }
+        } catch {
+            $ErrorActionPreference = 'Stop'
+            $problem = "Could not run cato-users.js: $($_.Exception.Message)"
+        } finally {
+            Remove-Item $req, $res -Force -ErrorAction SilentlyContinue
+        }
+        $entry = $null
+        if (-not $problem) { $entry = $parsed['group'] }
+        if (-not $entry) {
+            $entry = [ordered]@{ name = [string]$list.cato.name; source = 'cato'; found = $false
+                error = $(if ($problem) { $problem } else { 'No result for Cato' }); members = @(); retry = $true }
+        }
+        if ($entry['warning']) { Write-Log ("  {0} (Cato): {1}" -f $entry['name'], $entry['warning']) }
+        if ($entry['error']) { Write-Log ("  {0} (Cato): FAILED - {1}" -f $entry['name'], $entry['error']) }
+        else { Write-Log ("  {0} (Cato): {1} licensed user(s)" -f $entry['name'], @($entry['members']).Count) }
+        $entry
+    }
+
     $results = [ordered]@{}
     $entraResults = @{}
+    $catoResult = $null
     $retryable = { param($e) $e['error'] -and $e['retry'] }
     for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
         $toRead = @($groupNames | Where-Object { -not $results.Contains($_) -or (& $retryable $results[$_]) })
         $entraToRead = @($entraGroups | Where-Object { -not $entraResults.ContainsKey([string]$_.id) -or (& $retryable $entraResults[[string]$_.id]) })
-        if (-not $toRead.Count -and -not $entraToRead.Count) { break }
+        $catoToRead = $catoWanted -and ((-not $catoResult) -or (& $retryable $catoResult))
+        if (-not $toRead.Count -and -not $entraToRead.Count -and -not $catoToRead) { break }
         if ($attempt -gt 1) {
-            Write-Log "Trying $($toRead.Count + $entraToRead.Count) group(s) again in $RetryMinutes minute(s) (attempt $attempt of $Attempts)"
+            Write-Log "Trying $($toRead.Count + $entraToRead.Count + [int]$catoToRead) group(s) again in $RetryMinutes minute(s) (attempt $attempt of $Attempts)"
             Start-Sleep -Seconds ($RetryMinutes * 60)
         }
         foreach ($name in $toRead) {
@@ -209,10 +250,13 @@ try {
             $read = Read-EntraGroups $entraToRead
             foreach ($id in $read.Keys) { $entraResults[$id] = $read[$id] }
         }
+        if ($catoToRead) { $catoResult = Read-CatoUsers }
     }
     $groups = @()
     $failures = 0
     $ordered = @($groupNames | ForEach-Object { $results[$_] }) + @($entraGroups | ForEach-Object { $entraResults[[string]$_.id] })
+    # The unary comma adds the entry as one item (a dictionary must not be unrolled into its keys)
+    if ($catoResult) { $ordered += ,$catoResult }
     foreach ($entry in $ordered) {
         $entry.Remove('retry')
         if ($entry['error']) { $failures++ }
